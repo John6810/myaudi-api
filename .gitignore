@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[codz]
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tests / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type checkers
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Credentials & secrets
+.env
+.env.local
+*.audi_connect_tokens.json
+
+# OS
+.DS_Store
+Thumbs.db
+.claude/
