@@ -329,4 +329,6 @@ Tokens are cached locally (`~/.audi_connect_tokens.json`, 1h TTL, restricted fil
 
 ## License
 
-This project is for personal use. Usage of the Audi Connect API is subject to Audi AG's terms of service.
+MIT License. See [LICENSE](LICENSE) for details.
+
+Usage of the Audi Connect API is subject to Audi AG's terms of service.
