@@ -67,8 +67,15 @@ DATA_CACHE_TTL = int(os.getenv("AUDI_CACHE_TTL", "14400"))
 # Webhook URL for state change notifications (optional)
 WEBHOOK_URL = os.getenv("AUDI_WEBHOOK_URL")
 
-# Watch interval for background polling (default: 5 min, 0 = disabled)
-WATCH_INTERVAL = int(os.getenv("AUDI_WATCH_INTERVAL", "0"))
+# Watch interval for background polling (default: 0 = disabled)
+# Audi's API has aggressive rate limits (~6 req/hour). Enforcing a 15 min minimum
+# to avoid account lockout. Set to 0 to disable background polling entirely.
+MIN_WATCH_INTERVAL = 15 * 60
+_raw_watch_interval = int(os.getenv("AUDI_WATCH_INTERVAL", "0"))
+if _raw_watch_interval > 0 and _raw_watch_interval < MIN_WATCH_INTERVAL:
+    WATCH_INTERVAL = MIN_WATCH_INTERVAL
+else:
+    WATCH_INTERVAL = _raw_watch_interval
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,6 +83,13 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("audi-api")
+
+if _raw_watch_interval > 0 and _raw_watch_interval < MIN_WATCH_INTERVAL:
+    log.warning(
+        "AUDI_WATCH_INTERVAL=%ds is below the %ds minimum (Audi rate limits ~6 req/hour). "
+        "Clamped to %ds to avoid account lockout.",
+        _raw_watch_interval, MIN_WATCH_INTERVAL, WATCH_INTERVAL,
+    )
 
 
 # ---------------------------------------------------------------------------

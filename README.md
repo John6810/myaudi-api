@@ -6,6 +6,8 @@ Based on the open-source [audiconnect/audi_connect_ha](https://github.com/audico
 
 > **Disclaimer:** For personal and educational use only. Not affiliated with, endorsed by, or sponsored by Audi AG or Volkswagen Group. Use at your own risk — usage of the Audi Connect service is subject to Audi AG's terms of service.
 
+> ⚠️ **Rate limits:** Audi's API is known to enforce aggressive rate limits (~6 requests/hour). Excessive polling will temporarily lock your account **and** the official myAudi app until the window resets. The default settings here are conservative (4h cache, background watcher disabled, 15 min minimum poll interval) — don't override them unless you know what you're doing.
+
 ## Features
 
 - Full vehicle status (mileage, range, fuel level, oil level, AdBlue)
@@ -97,7 +99,7 @@ python main.py heater-start --duration 30
 python main.py heater-stop
 
 # Watch mode — monitor changes, send webhooks
-python main.py watch --interval 300
+python main.py watch --interval 900
 
 # Target a specific VIN (if multiple vehicles)
 python main.py status --vin WAUXXXXXXXXXXXXX

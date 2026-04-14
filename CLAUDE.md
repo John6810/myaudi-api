@@ -144,7 +144,7 @@ python main.py heater-start --duration 30
 python main.py heater-stop
 
 # Watch mode (poll + webhooks)
-python main.py watch --interval 300
+python main.py watch --interval 900
 ```
 
 ## REST API endpoints

@@ -28,6 +28,10 @@ load_dotenv()
 # Default VIN from .env (avoids --vin on every call for single-vehicle users)
 DEFAULT_VIN = os.getenv("AUDI_DEFAULT_VIN")
 
+# Audi's API has aggressive rate limits (~6 req/hour).
+# Enforcing a 15 min minimum for watch mode to avoid account lockout.
+MIN_WATCH_INTERVAL = 15 * 60
+
 
 def _format_error(e: Exception) -> str:
     """Convert exceptions to user-friendly messages."""
@@ -200,6 +204,13 @@ async def cmd_heater_stop(args):
 async def cmd_watch(args):
     """Watch vehicle status and print changes."""
     interval = args.interval
+    if interval < MIN_WATCH_INTERVAL:
+        print(
+            f"Warning: interval {interval}s is below the {MIN_WATCH_INTERVAL}s minimum "
+            f"(Audi rate limits ~6 req/hour). Clamped to {MIN_WATCH_INTERVAL}s to avoid "
+            f"account lockout.\n"
+        )
+        interval = MIN_WATCH_INTERVAL
     webhook_url = os.getenv("AUDI_WEBHOOK_URL")
     print(f"Watching vehicle status every {interval}s (Ctrl+C to stop)\n")
 
@@ -315,7 +326,7 @@ Examples:
   python main.py position --open-maps       # Show position and open in browser
   python main.py lock --confirm             # Lock and wait for confirmation
   python main.py climate-start --temp 22
-  python main.py watch --interval 300       # Monitor changes every 5 min
+  python main.py watch --interval 900       # Monitor changes every 15 min (Audi rate limit min)
 
 Environment variables (or .env file):
   AUDI_USERNAME      myAudi account email
@@ -371,7 +382,7 @@ Environment variables (or .env file):
 
     # Watch
     watch_parser = subparsers.add_parser("watch", parents=[shared], help="Monitor vehicle and report changes")
-    watch_parser.add_argument("--interval", type=int, default=300, help="Poll interval in seconds (default: 300)")
+    watch_parser.add_argument("--interval", type=int, default=900, help="Poll interval in seconds (default: 900, min: 900 — Audi rate limits)")
 
     args = parser.parse_args()
 
