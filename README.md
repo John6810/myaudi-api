@@ -26,6 +26,18 @@ Based on the open-source [audiconnect/audi_connect_ha](https://github.com/audico
 - OAuth token caching to avoid re-authenticating on every run
 - Interactive setup (`python main.py setup`)
 
+## Documentation
+
+In-depth technical reference is in [`docs/`](docs/README.md):
+
+- [Architecture](docs/architecture.md) — module layout, layered design
+- [OAuth flow](docs/oauth-flow.md) — the 13-step authentication
+- [Auth lifecycle](docs/auth-lifecycle.md) — refresh vs login
+- [API reference](docs/api-reference.md) — REST + CLI
+- [Observability](docs/observability.md) — metrics, health, logs
+- [Deployment](docs/deployment.md) — K8s + ArgoCD + secrets
+- [Development](docs/development.md) — tests, patterns, pitfalls
+
 ## Quick Start
 
 ```bash
