@@ -125,16 +125,6 @@ class AudiVehicleActions:
                 headers=headers, data=data,
             )
 
-    async def set_charge_mode(self, vin: str, timer: bool = False) -> None:
-        """Set charge mode to timer or manual."""
-        data = json.dumps({"preferredChargeMode": "timer" if timer else "manual"})
-        headers = {"Authorization": "Bearer " + self._bearer_token["access_token"]}
-        await self._api.request(
-            "PUT",
-            self._client._get_cariad_url_for_vin(vin, "charging/mode"),
-            headers=headers, data=data,
-        )
-
     async def start_preheater(self, vin: str, duration: int = 30) -> None:
         """Start auxiliary heater for the given duration (minutes)."""
         data = json.dumps({"duration_min": duration, "spin": self._spin})

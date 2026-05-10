@@ -107,20 +107,10 @@ class AudiVehicle:
             _LOGGER.debug("Failed to get %s trip data: %s", kind, e)
 
     def _get_field(self, name: str) -> Optional[object]:
-        if self._vehicle_data is None:
-            return None
-        for field in self._vehicle_data.data_fields:
-            if field.name == name:
-                return field
-        return None
+        return self._vehicle_data.get_field(name) if self._vehicle_data else None
 
     def _get_state(self, name: str) -> Optional[dict]:
-        if self._vehicle_data is None:
-            return None
-        for state in self._vehicle_data.states:
-            if state["name"] == name:
-                return state
-        return None
+        return self._vehicle_data.get_state(name) if self._vehicle_data else None
 
     # --- Vehicle info ---
 

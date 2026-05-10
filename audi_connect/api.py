@@ -3,11 +3,10 @@
 import json
 import logging
 import asyncio
-from datetime import datetime
 from typing import Any, Optional, Union
 from asyncio import TimeoutError, CancelledError
 from aiohttp import ClientSession, ClientResponse, ClientResponseError
-from aiohttp.hdrs import METH_GET, METH_POST, METH_PUT
+from aiohttp.hdrs import METH_GET
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -71,7 +70,7 @@ class AudiAPI:
 
                     elif response.status in (200, 202, 207):
                         raw_body = await response.text()
-                        return json_loads(raw_body)
+                        return json.loads(raw_body)
 
                     else:
                         raise ClientResponseError(
@@ -93,32 +92,6 @@ class AudiAPI:
             raw_reply=raw_reply, raw_contents=raw_contents, **kwargs,
         )
 
-    async def put(self, url: str, data: Any = None, headers: Optional[dict] = None) -> Any:
-        full_headers = self._get_headers()
-        if headers:
-            full_headers.update(headers)
-        return await self.request(METH_PUT, url, headers=full_headers, data=data)
-
-    async def post(
-        self,
-        url: str,
-        data: Any = None,
-        headers: Optional[dict] = None,
-        use_json: bool = True,
-        raw_reply: bool = False,
-        raw_contents: bool = False,
-        **kwargs: Any,
-    ) -> Any:
-        full_headers = self._get_headers()
-        if headers:
-            full_headers.update(headers)
-        if use_json and data is not None:
-            data = json.dumps(data)
-        return await self.request(
-            METH_POST, url, headers=full_headers, data=data,
-            raw_reply=raw_reply, raw_contents=raw_contents, **kwargs,
-        )
-
     def _get_headers(self) -> dict[str, str]:
         data = {
             "Accept": "application/json",
@@ -132,16 +105,3 @@ class AudiAPI:
         if self._xclient_id is not None:
             data["X-Client-ID"] = self._xclient_id
         return data
-
-
-def obj_parser(obj: dict) -> dict:
-    for key, val in obj.items():
-        try:
-            obj[key] = datetime.strptime(val, "%Y-%m-%dT%H:%M:%S%z")
-        except (TypeError, ValueError):
-            pass
-    return obj
-
-
-def json_loads(s: str) -> Any:
-    return json.loads(s, object_hook=obj_parser)
