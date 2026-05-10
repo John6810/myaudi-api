@@ -84,7 +84,7 @@ Before writing any test, **read the relevant existing test file** to understand 
 1. Run the new test in isolation: `python -m pytest tests/test_<file>.py::Test<Class>::test_<name> -v`
 2. Run the full test file: `python -m pytest tests/test_<file>.py -v`
 3. If both green, run the full suite: `python -m pytest tests/ -v`
-4. **Don't merge with fewer than 145 tests**. If your change made an existing test obsolete, replace it — don't delete it silently.
+4. **Don't merge with fewer than 183 tests**. If your change made an existing test obsolete, replace it — don't delete it silently.
 
 ## Output format
 

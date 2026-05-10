@@ -69,8 +69,10 @@ AUDI_WEBHOOK_URL=https://n8n.example.com/webhook/audi
 | `AUDI_API_LEVEL` | `0` = legacy MBB, `1` = new CARIAD API | `1` |
 | `AUDI_DEFAULT_VIN` | Default VIN — skip `--vin` for single-vehicle users | (optional) |
 | `AUDI_WEBHOOK_URL` | Webhook URL for state change notifications | (optional) |
+| `AUDI_WEBHOOK_SECRET` | If set, webhooks are signed with HMAC-SHA256 in the `X-Audi-Signature` header | (optional) |
 | `AUDI_WATCH_INTERVAL` | Background poll interval in seconds (API server only) | `0` (disabled) |
 | `AUDI_CACHE_TTL` | Data cache TTL in seconds | `14400` (4h) |
+| `AUDI_API_KEY` | Required header `X-API-Key` on all endpoints except `/health`, `/ready`, `/metrics`. Set to a strong random token. | (optional but **strongly recommended**) |
 
 ### Commands
 
@@ -192,25 +194,27 @@ Every request gets an `X-Request-ID` header (provided by the client if present, 
 
 ### Endpoints
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | Health check + cache info |
-| `GET` | `/vehicles` | List vehicles |
-| `GET` | `/status` | Full vehicle status (optional `?vin=`) |
-| `GET` | `/brief` | Quick status: locked, position, range |
-| `GET` | `/position` | GPS position (optional `?vin=`) |
-| `POST` | `/{vin}/lock` | Lock vehicle (`?confirm=true` to verify) |
-| `POST` | `/{vin}/unlock` | Unlock vehicle (`?confirm=true` to verify) |
-| `POST` | `/{vin}/climate/start` | Start climate (`?temp=21&confirm=true`) |
-| `POST` | `/{vin}/climate/stop` | Stop climate |
-| `POST` | `/{vin}/heater/start` | Start heater (`?duration=30&confirm=true`) |
-| `POST` | `/{vin}/heater/stop` | Stop heater |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/health` | public | Liveness check + cache info. 200 even when Audi is degraded. |
+| `GET` | `/ready` | public | Readiness probe. 503 until authenticated to Audi Connect. |
+| `GET` | `/metrics` | public | Prometheus metrics in text format. |
+| `GET` | `/vehicles` | X-API-Key | List vehicles |
+| `GET` | `/status` | X-API-Key | Full vehicle status (optional `?vin=`) |
+| `GET` | `/brief` | X-API-Key | Quick status: locked, position, range |
+| `GET` | `/position` | X-API-Key | GPS position (optional `?vin=`) |
+| `POST` | `/{vin}/lock` | X-API-Key | Lock vehicle (`?confirm=true` to verify) |
+| `POST` | `/{vin}/unlock` | X-API-Key | Unlock vehicle (`?confirm=true` to verify) |
+| `POST` | `/{vin}/climate/start` | X-API-Key | Start climate (`?temp=21&confirm=true`) |
+| `POST` | `/{vin}/climate/stop` | X-API-Key | Stop climate |
+| `POST` | `/{vin}/heater/start` | X-API-Key | Start heater (`?duration=30&confirm=true`) |
+| `POST` | `/{vin}/heater/stop` | X-API-Key | Stop heater |
 
 Action endpoints accept `?confirm=true` to wait 5 seconds after the action, re-fetch vehicle data, and return the updated status. Without it, the response is immediate (`"status": "sent"`).
 
 Cache is automatically invalidated after any action so the next `GET /status` reflects the change.
 
-**Rate limiting**: read endpoints allow 30 requests/min, action endpoints allow 5 requests/min. Exceeding returns HTTP 429.
+**Rate limiting**: read endpoints allow 30 requests/min, action endpoints allow 5 requests/min. Exceeding returns HTTP 429. The `/health`, `/ready` and `/metrics` endpoints are not rate-limited and don't require `X-API-Key` — they are intended for kubelet probes and Prometheus scraping.
 
 ### Example responses
 
@@ -338,28 +342,35 @@ myaudi-api/
   requirements.txt
   audi_connect/
     oauth.py               # 13-step OAuth2/OIDC login flow
-    auth.py                # Token coordinator (delegates to oauth.py)
+    oauth_state.py         # Frozen OAuthState dataclass (10 token fields, from_dict / to_dict / with_refresh)
+    auth.py                # Token coordinator (delegates to oauth.py / client / actions)
+    endpoints.py           # cariad_url() helper + AudiEndpoints (URL building + home-region cache)
     client.py              # Read-only API calls (status, position, trips)
     actions.py             # Remote actions (lock, climate, heater)
     api.py                 # Low-level HTTP client (retry, timeout)
     connection.py          # Shared connection helpers
-    vehicle.py             # AudiVehicle (properties, validation, brief/dashboard, action retry)
+    vehicle.py             # AudiVehicle (properties, validation, brief/dashboard, idempotent-only retry)
     watcher.py             # Shared watch logic (diff_states, check_vehicles callbacks)
     models.py              # Response parsing + LockState/DoorState/WindowState enums
     utils.py               # Utility functions
     exceptions.py          # Custom exceptions
     token_store.py         # Token persistence (restricted file permissions)
-  tests/                   # 145 tests (pytest + pytest-asyncio + aioresponses)
-    test_vehicle.py        # is_moving, parallel fetch, validation, brief
+    logging_utils.py       # redact() + RedactingFilter (masks bearer tokens, OAuth JSON, X-QMAuth, emails in logs)
+  tests/                   # 183 tests (pytest + pytest-asyncio + aioresponses)
+    test_vehicle.py        # is_moving, parallel fetch, validation, brief, idempotent retry policy
     test_actions.py        # S-PIN hash, climate (CARIAD + legacy), heater
-    test_auth.py           # Token restore, login, refresh, OAuth helpers
+    test_auth.py           # Token restore, login (returns vehicle list), refresh, OAuth helpers
     test_integration.py    # Integration tests (real HTTP stack, mocked network)
     test_watcher.py        # State diff, vehicle polling callbacks
-    test_models.py         # Response parsing, enums
+    test_models.py         # Response parsing, enums, indexed get_field/get_state
     test_cli.py            # Error formatting, VIN resolution
     test_utils.py          # Utility functions
-    test_token_store.py    # Token persistence
+    test_token_store.py    # OAuthState round-trip persistence
     test_exceptions.py     # Exception hierarchy
+    test_endpoints.py      # cariad_url + AudiEndpoints home-region cache
+    test_logging_utils.py  # redact patterns + RedactingFilter
+    test_observability.py  # /metrics, /ready, X-Request-ID middleware
+    test_api_auth.py       # X-API-Key dependency on protected endpoints
   .github/workflows/
     build.yml              # CI/CD: Docker build + GHCR push + GitOps update
 ```
@@ -370,7 +381,7 @@ myaudi-api/
 python -m pytest tests/ -v
 ```
 
-145 tests covering: authentication flow, OAuth helpers, token management, vehicle data parsing, action validation, parallel fetching, error formatting, enums, state watcher, and integration tests with mocked HTTP.
+183 tests covering: authentication flow, OAuth helpers, OAuthState dataclass + token persistence, vehicle data parsing, action validation, idempotent-only retry policy, parallel fetching, error formatting, enums, state watcher, integration tests with mocked HTTP, URL building / home-region cache, log secret redaction, X-API-Key dependency, /metrics + /ready + request-id middleware.
 
 ## How It Works
 
@@ -402,6 +413,7 @@ Tokens are cached locally (`~/.audi_connect_tokens.json`, 1h TTL, restricted fil
 - `fastapi` - REST API framework
 - `uvicorn` - ASGI server
 - `slowapi` - Rate limiting
+- `prometheus-fastapi-instrumentator` - Standard FastAPI HTTP metrics + custom business metrics on `/metrics`
 - `pytest` + `pytest-asyncio` + `aioresponses` - Testing
 
 ## License

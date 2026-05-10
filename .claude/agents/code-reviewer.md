@@ -14,7 +14,7 @@ Run `git diff --staged` first (fall back to `git diff` if nothing staged). Then 
 ### 1. Tests
 - Did this change add new behavior without a test? Flag it.
 - Are tests using the right tool? (`AsyncMock` for unit tests, `aioresponses` for integration tests in `tests/test_integration.py`)
-- Will the existing 145 tests still pass? If unsure, run `python -m pytest tests/ -v`.
+- Will the existing 183 tests still pass? If unsure, run `python -m pytest tests/ -v`.
 
 ### 2. Audi rate limits (CRITICAL)
 - Did anyone touch `MIN_WATCH_INTERVAL`, `DATA_CACHE_TTL`, or the slowapi limits (`30/minute` reads, `5/minute` actions)? Audi's API enforces ~6 req/h per account. Lowering these can lock the user's account AND the official myAudi app.

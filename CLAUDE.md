@@ -24,23 +24,33 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
   5. MBB OAuth client registration + MBB (VW Group) token
   - Also handles token refresh (MBB, IDK, AZS)
   - X-QMAuth header via HMAC-SHA256 with a secret from the APK and a 100s-window timestamp
+- **`oauth_state.py`** - `OAuthState`: frozen dataclass holding all 10 OAuth tokens / endpoint URLs after login
+  - `from_dict(d)` builds from oauth login result or TokenStore.load
+  - `to_dict()` for serialization
+  - `with_refresh(refreshed)` returns a new state merging an oauth.refresh_tokens result (immutable update)
 - **`auth.py`** - `AudiAuth`: thin coordinator that manages token state, persistence, and delegates to client/actions
-  - Manages 3 tokens: `_bearer_token_json` (IDK/CARIAD), `audi_token` (AZS), `vw_token` (MBB)
+  - Holds a single `_state: Optional[OAuthState]` instead of 10 individual attrs
+  - Backwards-compat property proxies (`vw_token`, `audi_token`, `mbb_oauth_token`, `xclient_id`) for now — to be removed when no external reader needs them
   - Automatic token refresh + persistence via `TokenStore`
+  - `login()` returns the validated vehicle list directly (no more consume-once cache hack)
   - Delegates OAuth flow to `oauth.py`, API calls to `client.py`, actions to `actions.py`
-- **`client.py`** - `AudiVehicleClient`: read-only API calls (vehicle status, position, trips, charger, climater, preheater)
-- **`actions.py`** - `AudiVehicleActions`: remote actions (lock/unlock, climate control, heater, charge mode)
+- **`endpoints.py`** - URL building + home-region cache shared by client/actions/oauth
+  - `cariad_url(country, path, **kw)`: free function for stateless CARIAD URL building (used during OAuth before any state exists)
+  - `AudiEndpoints` class: per-VIN home-region resolution (one upstream call per VIN, cached); `set_vw_token()` after login/refresh; `cariad_url_for_vin()`, `home_region()`, `home_region_setter()`
+- **`client.py`** - `AudiVehicleClient`: read-only API calls (vehicle status, position, trips). Receives an `AudiEndpoints` instance instead of building URLs itself.
+- **`actions.py`** - `AudiVehicleActions`: remote actions (lock/unlock, climate control, heater)
+  - Receives an `AudiEndpoints` instance (no longer reaches into `client._get_*` privates)
   - S-PIN hash (SHA-512) for secured actions (lock/unlock)
   - Legacy MBB API uses deciKelvin for temperature: `temp_c * 10 + 2731`
-- **`api.py`** - Low-level HTTP client (GET/POST/PUT with myAudi headers, 30s timeout, 3x retry with exponential backoff)
+- **`api.py`** - Low-level HTTP client (GET/POST with myAudi headers, 30s timeout, 3x retry with exponential backoff on transport errors)
 - **`connection.py`** - Shared helpers: `create_session()` (SSL via certifi), `connect_and_get_vehicles()`
 - **`watcher.py`** - Shared vehicle state watcher logic (used by both CLI `watch` and API background poller):
   - `diff_states()`: compare two brief state dicts and return changed fields
   - `check_vehicles()`: poll vehicles, compute diffs, fire callbacks (`on_change`, `on_initial`, `on_error`)
 - **`vehicle.py`** - `AudiVehicle` class:
-  - Properties: mileage, range, battery, doors, windows, climate, trips
+  - Properties: mileage, range, battery, doors, windows, climate, trips (`_get_field`/`_get_state` are O(1) dict lookups via the indexed `VehicleDataResponse`)
   - Actions with input validation: `start_climatisation(16-30°C)`, `start_preheater(10-60 min)`
-  - Actions have business-level retry (3 attempts, exponential backoff) on network errors — validation errors are NOT retried
+  - **Idempotent-only retry policy**: `_idempotent_action_retry` (3 attempts, 2-10s exp backoff) applied ONLY to `lock`, `stop_climatisation`, `stop_preheater` (end-state same on duplicate). `unlock`, `start_climatisation`, `start_preheater` are NOT retried — duplicates can re-trigger notifications, extend the heater timer, or burn S-PIN tokens against the ~6 req/h Audi budget. Validation errors are never retried.
   - `get_brief()`: essentials only (locked, position, range)
   - `get_dashboard()`: full status dict
   - `update()`: parallel fetch via `asyncio.gather()` (status + position + trips)
@@ -48,19 +58,28 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
 - **`models.py`** - API response parsing with enums:
   - `VehicleDataResponse` (old/new API field mapping), `TripDataResponse`
   - `LockState`, `DoorState`, `WindowState` enums (replace magic strings)
+  - O(1) lookup via `get_field(name)` / `get_state(name)` — `data_fields` and `states` are indexed by name in `__init__` after parsing
   - Safe parsing with `.get()` chains
 - **`utils.py`** - Helpers: `get_attr` (deep dict access), `parse_int/float/datetime`, `to_byte_array`
 - **`exceptions.py`** - Custom exceptions: `AuthenticationError`, `TokenRefreshError`, `SpinRequiredError`, `CountryNotSupportedError`, `RequestTimeoutError`, etc.
+- **`logging_utils.py`** - `redact()` helper + `RedactingFilter` (logging filter, installed at startup in `server.py` and `main.py`)
+  - Masks bearer tokens, JSON OAuth values (`access_token`, `refresh_token`, `id_token`, `securityToken`, `securityPinHash`, `password`, `spin`, `client_secret`, `code_verifier`), `X-QMAuth` HMAC values, and emails (`xxx***@domain`)
+  - Belt-and-suspenders: `aiohttp.*` loggers pinned to WARNING regardless of root level
 - **`token_store.py`** - OAuth token persistence in `~/.audi_connect_tokens.json` (1h TTL, 0o600 permissions on Linux/Mac)
 
 ### Entry points
-- **`api.py`** (root) - FastAPI REST API server:
+- **`server.py`** (root, formerly `api.py`) - FastAPI REST API server:
+  - All endpoints except `/health`, `/ready`, `/metrics` require `X-API-Key` header (matches `AUDI_API_KEY` env var via `Depends(require_api_key)`); fails closed with 503 if the key is unset on the server
   - Rate limiting via slowapi: 30 req/min (read), 5 req/min (actions) — HTTP 429 on exceed
-  - 4h data cache (auto-invalidated after actions)
+  - 4h data cache (auto-invalidated after actions); concurrent `?confirm=true` calls serialized through `_update_lock`
   - Auto token refresh every 45min
   - `?confirm=true` on action endpoints to wait and verify
   - `GET /brief` for quick status
-  - Background watcher with webhook support (optional, uses shared `watcher.py`)
+  - `GET /ready` returns 503 until authenticated to Audi Connect; `GET /health` always 200 if process alive
+  - `GET /metrics` exposes Prometheus text format (FastAPI HTTP metrics + 4 business metrics)
+  - `X-Request-ID` middleware: propagates request id via contextvar to log records as `[rid=...]`
+  - Background watcher with webhook support (optional, uses shared `watcher.py`); webhooks optionally signed via HMAC-SHA256 (`X-Audi-Signature: sha256=<hex>`) when `AUDI_WEBHOOK_SECRET` is set
+  - Single-replica invariant documented in the file header: in-process cache + slowapi limiter + watcher + token store all assume `replicas: 1`
 - **`main.py`** - CLI with subcommands: `setup`, `status` (`--brief`), `position` (`--open-maps`), `lock`/`unlock` (`--confirm`), `climate-start`/`stop`, `heater-start`/`stop`, `watch`
   - `-v` flag works both before and after subcommand (shared parent parser)
   - User-friendly error messages (no raw tracebacks)
@@ -69,17 +88,21 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
 - **`ha_sensor.py`** - Home Assistant script (command_line sensor), outputs JSON to stdout
 
 ### Tests
-- **`tests/`** - 145 tests (pytest + pytest-asyncio) covering:
+- **`tests/`** - 183 tests (pytest + pytest-asyncio + aioresponses + httpx for FastAPI TestClient) covering:
   - `test_utils.py` - utility functions
-  - `test_models.py` - response parsing + enums
+  - `test_models.py` - response parsing + enums + indexed `get_field`/`get_state`
   - `test_exceptions.py` - exception hierarchy
-  - `test_token_store.py` - token persistence
-  - `test_vehicle.py` - is_moving, parallel update, safe parsing, input validation, brief, dashboard null safety
+  - `test_token_store.py` - `OAuthState` round-trip persistence
+  - `test_vehicle.py` - is_moving, parallel update, safe parsing, input validation, brief, dashboard null safety, **idempotent-only retry policy** (10 tests)
   - `test_actions.py` - S-PIN hash, climate (CARIAD + legacy), preheater, headers
-  - `test_auth.py` - token restore, login flow, refresh, OAuth helpers
+  - `test_auth.py` - token restore, login (returns vehicle list), refresh, OAuth helpers, `OAuthState` integration
   - `test_cli.py` - error formatting, VIN resolution
   - `test_watcher.py` - diff_states, check_vehicles callbacks, VIN filter, error handling
   - `test_integration.py` - integration tests with aioresponses: real HTTP stack with mocked network (vehicle list, position, climate, preheater, retry on timeout/connection error)
+  - `test_endpoints.py` - `cariad_url` URL building + `AudiEndpoints` home-region cache
+  - `test_logging_utils.py` - `redact` patterns + `RedactingFilter` filter behavior
+  - `test_observability.py` - `/metrics`, `/ready`, `X-Request-ID` middleware
+  - `test_api_auth.py` - `X-API-Key` dependency on protected endpoints (401 / 503 / 200 / public `/health`)
 - Run with: `python -m pytest tests/ -v`
 
 ## External APIs
@@ -109,8 +132,10 @@ Environment variables (`.env` file — run `python main.py setup` to create inte
 - `AUDI_API_LEVEL` - 0 = legacy MBB, 1 = new CARIAD API (default: 1)
 - `AUDI_DEFAULT_VIN` - Default VIN, skip `--vin` for single-vehicle users (optional)
 - `AUDI_WEBHOOK_URL` - Webhook URL for state change notifications (optional)
+- `AUDI_WEBHOOK_SECRET` - HMAC-SHA256 secret to sign outgoing webhooks (`X-Audi-Signature: sha256=<hex>` header). Unsigned if unset (optional)
 - `AUDI_WATCH_INTERVAL` - Background poll interval in seconds, 0 = disabled (API server only)
 - `AUDI_CACHE_TTL` - Data cache TTL in seconds (default: 14400 = 4h)
+- `AUDI_API_KEY` - Required `X-API-Key` header on all REST endpoints except `/health`, `/ready`, `/metrics`. Server fails closed (503) if endpoints are called while this is unset (strongly recommended)
 
 ## Useful commands
 ```bash
@@ -148,8 +173,11 @@ python main.py watch --interval 900
 ```
 
 ## REST API endpoints
+All endpoints below except `/health`, `/ready`, `/metrics` require the `X-API-Key` header (matched against `AUDI_API_KEY`). Without the header → 401. With server `AUDI_API_KEY` unset → 503.
 ```
-GET  /health              Health check + cache info
+GET  /health              Liveness probe + cache info (public, 200 even when degraded)
+GET  /ready               Readiness probe (public, 503 until authenticated to Audi Connect)
+GET  /metrics             Prometheus text format (public, scrape target)
 GET  /vehicles            List vehicles
 GET  /status              Full vehicle status
 GET  /brief               Quick status (locked, position, range)
@@ -172,9 +200,16 @@ POST /{vin}/heater/stop   Stop heater
 - Action endpoints support `?confirm=true` to wait 5s and verify the action was applied
 - Door/window states use `LockState`, `DoorState`, `WindowState` enums (not magic strings)
 - Input validation in core classes: temperature 16-30°C, heater duration 10-60 min
-- Network calls are retried 3 times with exponential backoff (1s, 2s, 4s) on timeout or connection errors
-- Vehicle actions (lock, climate, heater) have an additional business-level retry (3 attempts, 2-10s backoff) — only on network errors, not validation errors
-- API rate limiting: 30/min for reads, 5/min for actions (HTTP 429 with clear message)
+- Network calls are retried 3 times with exponential backoff (1s, 2s, 4s) on timeout or connection errors (transport layer, in `audi_connect/api.py`)
+- Vehicle actions: business-level retry is **applied only to idempotent actions** (`lock`, `stop_climatisation`, `stop_preheater`) via `_idempotent_action_retry` (3 attempts, 2-10s backoff). `unlock`, `start_climatisation`, `start_preheater` are NOT retried at the metier layer to avoid double-fire on the ~6 req/h Audi budget. Validation errors (out-of-range temp/duration) are never retried.
+- REST API protected by `X-API-Key` header on all endpoints except `/health`, `/ready`, `/metrics`. Wired via FastAPI `Depends(require_api_key)` in `server.py`. Fails closed (503) if `AUDI_API_KEY` is unset on the server.
+- Logs sanitized via `RedactingFilter` (in `audi_connect/logging_utils.py`) — masks bearer tokens, OAuth JSON keys (access/refresh/id_token, password, spin, securityToken, securityPinHash, client_secret, code_verifier), `X-QMAuth` HMAC values, and emails (`xxx***@domain`). Installed once at startup in `server.py` and `main.py`.
+- `X-Request-ID` middleware on every request (uses client-provided value if present, else generates 12-hex-char uuid). Propagated to log records via contextvars and rendered as `[rid=...]` in log lines for end-to-end Loki/Grafana correlation.
+- Prometheus metrics exposed at `/metrics` via `prometheus-fastapi-instrumentator`: standard FastAPI HTTP metrics + 4 custom business metrics: `audi_auth_refresh_total{result}`, `audi_cache_operation_total{operation}`, `audi_action_total{action,result}`, `audi_backend_request_duration_seconds{endpoint}`.
+- Webhook payloads optionally signed with HMAC-SHA256 (`X-Audi-Signature: sha256=<hex>` header over the raw request body) when `AUDI_WEBHOOK_SECRET` is set. Backwards compatible: unsigned when unset.
+- Single-replica invariant: `server.py` and `audi_connect/token_store.py` carry header banners listing every piece of in-process state that breaks under `replicas > 1` (cache, slowapi limiter, watcher, token store). Do NOT scale beyond 1 without redesigning persistence and rate-limit storage.
+- API rate limiting: 30/min for reads, 5/min for actions (HTTP 429 with clear message); `/health`, `/ready`, `/metrics` are unlimited and unauthenticated.
 - CLI `-v` flag works in both positions: `main.py -v status` and `main.py status -v`
+- CLI `setup` uses `getpass.getpass()` for password and S-PIN to avoid echo + shell history exposure
 - Trip data returns 403 on Q4 e-tron (legacy MBB endpoint disabled for EV) — handled gracefully
 - Never commit the `.env` file (contains credentials)
