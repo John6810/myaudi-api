@@ -177,10 +177,12 @@ class AudiAuth:
     async def refresh_tokens(self, elapsed_sec: int) -> bool:
         """Refresh all tokens if they are about to expire.
 
-        TODO: wire this from api.py AudiClient.ensure_auth() — currently
-        ensure_auth re-runs the full 13-step login every TOKEN_REFRESH_INTERVAL,
-        which burns ~10 upstream round-trips per cycle. Calling this method
-        instead would cost only 3 (MBB + IDK + AZS).
+        Called by AudiClient.ensure_auth() before falling back to a
+        full login. Costs 3 upstream round-trips (MBB + IDK + AZS)
+        vs ~10 for a full login.
+
+        Returns True if a refresh actually happened, False if the
+        existing tokens are still valid enough not to need refreshing.
         """
         if self._state is None or self._state.mbb_oauth_token is None:
             return False
