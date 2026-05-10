@@ -32,4 +32,6 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
-.claude/
+
+# Claude local overrides (shared config in .claude/ is committed)
+.claude/settings.local.json

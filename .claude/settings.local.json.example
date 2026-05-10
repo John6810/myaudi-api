@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "_comment": "Local overrides — copy to settings.local.json (gitignored). Allows YOU to permit actions that hit the real Audi API, while keeping the shared config strict for collaborators.",
+  "permissions": {
+    "allow": [
+      "Bash(python main.py status*)",
+      "Bash(python main.py position*)",
+      "Bash(uvicorn api:app*)"
+    ]
+  }
+}

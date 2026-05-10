@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+
+      "Bash(python -m pytest*)",
+      "Bash(python -m pip install -r requirements.txt)",
+      "Bash(python -m pip install -e .)",
+      "Bash(python -m ruff*)",
+      "Bash(python -m mypy*)",
+      "Bash(python -m black*)",
+      "Bash(ruff*)",
+      "Bash(mypy*)",
+
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git branch*)",
+      "Bash(git checkout*)",
+      "Bash(git switch*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git restore*)",
+      "Bash(git stash*)",
+
+      "Bash(docker build*)",
+      "Bash(docker images*)",
+      "Bash(docker ps*)",
+
+      "Bash(ls*)",
+      "Bash(cat*)",
+      "Bash(head*)",
+      "Bash(tail*)",
+      "Bash(wc*)",
+      "Bash(find*)"
+    ],
+    "deny": [
+      "Bash(rm -rf*)",
+      "Bash(rm -fr*)",
+
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(~/.audi_connect_tokens.json)",
+      "Read(/root/.audi_connect_tokens.json)",
+      "Edit(./.env)",
+      "Edit(./.env.*)",
+      "Write(./.env)",
+      "Write(./.env.*)",
+
+      "Bash(python main.py setup*)",
+      "Bash(python main.py lock*)",
+      "Bash(python main.py unlock*)",
+      "Bash(python main.py climate-start*)",
+      "Bash(python main.py climate-stop*)",
+      "Bash(python main.py heater-start*)",
+      "Bash(python main.py heater-stop*)",
+      "Bash(python main.py watch*)",
+
+      "Bash(curl*cariad.digital*)",
+      "Bash(curl*vwg-connect.com*)",
+      "Bash(curl*audi.com*)",
+      "Bash(curl*identity.vwgroup.io*)",
+      "Bash(curl*mbboauth*)",
+      "Bash(wget*cariad.digital*)",
+      "Bash(wget*vwg-connect.com*)",
+
+      "Bash(docker push*)",
+      "Bash(kubectl delete*)",
+      "Bash(kubectl apply*)",
+      "Bash(argocd app delete*)",
+      "Bash(argocd app sync*)",
+
+      "Bash(git push*origin main*)",
+      "Bash(git push*--force*)",
+      "Bash(git push*-f*)",
+      "Bash(git reset --hard*)"
+    ]
+  }
+}
