@@ -168,6 +168,28 @@ curl -H "X-API-Key: your_key_here" http://localhost:8000/brief
 
 Without the header (or with a wrong key), endpoints return 401. If `AUDI_API_KEY` is unset on the server, all protected endpoints return 503.
 
+### Observability
+
+#### Metrics
+
+`GET /metrics` exposes Prometheus metrics in text format. In addition to the standard FastAPI HTTP metrics, four custom business metrics are emitted:
+
+- `audi_auth_refresh_total{result="success|failure"}` — login/refresh attempts
+- `audi_cache_operation_total{operation="hit|miss|invalidate"}` — cache events
+- `audi_action_total{action, result}` — remote actions counts
+- `audi_backend_request_duration_seconds{endpoint}` — upstream Audi latency
+
+The `/metrics`, `/health` and `/ready` endpoints are excluded from HTTP request metrics to avoid kubelet probes drowning the signal.
+
+#### Probes
+
+- `GET /health` — liveness. Returns 200 even when Audi Connect is degraded (don't kill the pod just because upstream is down).
+- `GET /ready` — readiness. Returns 503 until the service has successfully authenticated to Audi Connect.
+
+#### Request correlation
+
+Every request gets an `X-Request-ID` header (provided by the client if present, otherwise generated). The same value is included in log records under `[rid=...]` so requests can be correlated end-to-end in Loki/Grafana.
+
 ### Endpoints
 
 | Method | Path | Description |

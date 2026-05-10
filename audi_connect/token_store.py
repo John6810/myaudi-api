@@ -1,5 +1,10 @@
 """Token persistence - save and load OAuth tokens to avoid re-authenticating every time."""
 
+# Note: this store writes a single JSON file (default: ~/.audi_connect_tokens.json).
+# Concurrent writers — including two replicas of the API server sharing a volume —
+# will race and silently corrupt or lose tokens. The api.py service is single-replica
+# by design; do not change that without redesigning persistence.
+
 import json
 import logging
 import os
