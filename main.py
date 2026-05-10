@@ -255,8 +255,14 @@ async def cmd_watch(args):
 
 
 async def _send_webhook(url: str, vehicle, state: dict, changes: dict) -> None:
-    """POST state changes to a webhook URL."""
+    """POST state changes to a webhook URL.
+
+    Signs with HMAC-SHA256 over the raw body when AUDI_WEBHOOK_SECRET is set.
+    """
     import aiohttp
+    import hashlib
+    import hmac
+    import json
     payload = {
         "event": "state_change",
         "vin": vehicle.vin,
@@ -264,9 +270,18 @@ async def _send_webhook(url: str, vehicle, state: dict, changes: dict) -> None:
         "changes": changes,
         "state": state,
     }
+    body = json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    secret = os.getenv("AUDI_WEBHOOK_SECRET", "")
+    if secret:
+        sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        headers["X-Audi-Signature"] = f"sha256={sig}"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.post(
+                url, data=body, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
                 if resp.status < 300:
                     print(f"  [webhook] Sent to {url} (HTTP {resp.status})")
                 else:
@@ -389,6 +404,16 @@ Environment variables (or .env file):
 
     log_level = logging.DEBUG if args.verbose else logging.WARNING
     logging.basicConfig(level=log_level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    from audi_connect.logging_utils import RedactingFilter
+    for _h in logging.getLogger().handlers:
+        _h.addFilter(RedactingFilter())
+
+    # Belt-and-suspenders: pin aiohttp loggers to WARNING regardless of root level,
+    # in case aiohttp adds verbose client logging in future versions or someone
+    # enables DEBUG on the root logger.
+    for _name in ("aiohttp.client", "aiohttp.internal", "aiohttp.web", "aiohttp.access"):
+        logging.getLogger(_name).setLevel(logging.WARNING)
 
     if not args.command:
         parser.print_help()
