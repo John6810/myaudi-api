@@ -4,7 +4,9 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from audi_connect.auth import AudiAuth
+from audi_connect.client import AudiVehicleClient
 from audi_connect.oauth import AudiOAuth
+from audi_connect.oauth_state import OAuthState
 from audi_connect.exceptions import AuthenticationError, TokenRefreshError
 
 
@@ -56,7 +58,7 @@ class TestTokenRestore:
         result = auth._try_restore_tokens()
 
         assert result is True
-        assert auth._bearer_token_json == tokens["bearer_token"]
+        assert auth._state.bearer_token == tokens["bearer_token"]
         assert auth.vw_token == tokens["vw_token"]
         assert auth._client is not None
         assert auth._actions is not None
@@ -98,9 +100,9 @@ class TestLogin:
             mock_client = AsyncMock()
             mock_client.get_vehicle_list = AsyncMock(return_value=[{"vin": "TEST"}])
             auth._client = mock_client
-            await auth.login("user@test.com", "password123")
+            result = await auth.login("user@test.com", "password123")
 
-        assert auth._cached_vehicle_list == [{"vin": "TEST"}]
+        assert result == [{"vin": "TEST"}]
 
     @pytest.mark.asyncio
     async def test_login_fresh_when_no_cache(self):
@@ -115,7 +117,10 @@ class TestLogin:
         auth._oauth = AsyncMock()
         auth._oauth.login = AsyncMock(return_value=tokens)
 
-        await auth.login("user@test.com", "password123")
+        # login() now ends with await self.client.get_vehicle_list() — patch it
+        # on the AudiVehicleClient class so the freshly built delegate is mocked.
+        with patch.object(AudiVehicleClient, "get_vehicle_list", AsyncMock(return_value=[])):
+            await auth.login("user@test.com", "password123")
 
         auth._oauth.login.assert_awaited_once_with("user@test.com", "password123")
         store.save.assert_called_once()
@@ -127,7 +132,7 @@ class TestRefreshTokens:
     async def test_no_refresh_when_not_expired(self):
         api = MagicMock()
         auth = AudiAuth(api, country="DE")
-        auth.mbb_oauth_token = {"refresh_token": "x", "expires_in": 3600}
+        auth._set_state(OAuthState.from_dict(_make_tokens()))
         # elapsed_sec=100, threshold=100+300=400 < 3600 → no refresh
         result = await auth.refresh_tokens(elapsed_sec=100)
         assert result is False
@@ -136,7 +141,7 @@ class TestRefreshTokens:
     async def test_no_refresh_without_token(self):
         api = MagicMock()
         auth = AudiAuth(api, country="DE")
-        auth.mbb_oauth_token = None
+        # No state set — refresh_tokens must short-circuit on None.
         result = await auth.refresh_tokens(elapsed_sec=9999)
         assert result is False
 
@@ -148,7 +153,7 @@ class TestRefreshTokens:
         store = _make_token_store()
 
         auth = AudiAuth(api, country="DE", token_store=store)
-        auth._apply_tokens(tokens)
+        auth._set_state(OAuthState.from_dict(tokens))
         auth._build_delegates()
 
         fresh_tokens = {
@@ -164,7 +169,7 @@ class TestRefreshTokens:
         result = await auth.refresh_tokens(elapsed_sec=3500)
 
         assert result is True
-        assert auth._bearer_token_json["access_token"] == "new_bearer"
+        assert auth._state.bearer_token["access_token"] == "new_bearer"
         store.save.assert_called_once()
 
     @pytest.mark.asyncio
@@ -174,7 +179,7 @@ class TestRefreshTokens:
         tokens = _make_tokens()
 
         auth = AudiAuth(api, country="DE")
-        auth._apply_tokens(tokens)
+        auth._set_state(OAuthState.from_dict(tokens))
         auth._build_delegates()
 
         auth._oauth = AsyncMock()

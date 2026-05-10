@@ -6,6 +6,7 @@ import time
 import tempfile
 import pytest
 
+from audi_connect.oauth_state import OAuthState
 from audi_connect.token_store import TokenStore
 
 
@@ -20,8 +21,8 @@ def tmp_token_file():
         os.remove(path)
 
 
-def _make_tokens():
-    return dict(
+def _make_state() -> OAuthState:
+    return OAuthState(
         bearer_token={"access_token": "bearer_abc", "refresh_token": "br_ref"},
         audi_token={"access_token": "audi_abc"},
         vw_token={"access_token": "vw_abc"},
@@ -38,8 +39,7 @@ def _make_tokens():
 class TestTokenStore:
     def test_save_and_load(self, tmp_token_file):
         store = TokenStore(tmp_token_file)
-        tokens = _make_tokens()
-        store.save(**tokens)
+        store.save(_make_state())
 
         loaded = store.load()
         assert loaded is not None
@@ -53,8 +53,7 @@ class TestTokenStore:
 
     def test_load_expired(self, tmp_token_file):
         store = TokenStore(tmp_token_file)
-        tokens = _make_tokens()
-        store.save(**tokens)
+        store.save(_make_state())
 
         # Manually set saved_at to the past
         with open(tmp_token_file, "r") as f:
@@ -68,8 +67,7 @@ class TestTokenStore:
 
     def test_clear(self, tmp_token_file):
         store = TokenStore(tmp_token_file)
-        tokens = _make_tokens()
-        store.save(**tokens)
+        store.save(_make_state())
         assert os.path.exists(tmp_token_file)
 
         store.clear()

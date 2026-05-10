@@ -226,9 +226,7 @@ class AudiClient:
 
             api = AudiAPI(self._session)
             self._auth = AudiAuth(api, country=AUDI_COUNTRY, spin=AUDI_SPIN, api_level=AUDI_API_LEVEL)
-            await self._auth.login(AUDI_USERNAME, AUDI_PASSWORD)
-
-            vehicle_list = await self._auth.get_vehicle_list()
+            vehicle_list = await self._auth.login(AUDI_USERNAME, AUDI_PASSWORD)
             self.vehicles = [AudiVehicle(self._auth, v) for v in vehicle_list]
 
             self.authenticated = True

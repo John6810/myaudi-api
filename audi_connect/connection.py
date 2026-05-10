@@ -31,11 +31,9 @@ async def connect_and_get_vehicles(
     auth = AudiAuth(api, country=country, spin=spin, api_level=api_level)
 
     print("Connecting to Audi Connect...")
-    await auth.login(username, password)
+    vehicle_list = await auth.login(username, password)
     print("Connected!\n")
 
-    print("Fetching vehicles...")
-    vehicle_list = await auth.get_vehicle_list()
     print(f"{len(vehicle_list)} vehicle(s) found\n")
 
     vehicles = [AudiVehicle(auth, v_info) for v_info in vehicle_list]
