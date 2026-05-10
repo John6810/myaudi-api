@@ -6,6 +6,7 @@ Based on https://github.com/audiconnect/audi_connect_ha/
 
 import asyncio
 import argparse
+import getpass
 import logging
 import sys
 import os
@@ -287,9 +288,9 @@ def cmd_setup(args):
 
     print("\n--- Audi Connect Setup ---\n")
     username = input("myAudi email: ").strip()
-    password = input("myAudi password: ").strip()
+    password = getpass.getpass("myAudi password: ").strip()
     country = input("Country code [DE]: ").strip().upper() or "DE"
-    spin = input("S-PIN (for lock/unlock, leave empty to skip): ").strip()
+    spin = getpass.getpass("S-PIN (for lock/unlock, leave empty to skip): ").strip()
     api_level = input("API level (0=legacy, 1=new CARIAD) [1]: ").strip() or "1"
     default_vin = input("Default VIN (leave empty to skip): ").strip()
     webhook_url = input("Webhook URL for notifications (leave empty to skip): ").strip()
