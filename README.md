@@ -138,6 +138,36 @@ kubectl create secret generic audi-credentials \
   --from-literal=AUDI_API_LEVEL="1"
 ```
 
+### Authentication
+
+All endpoints except `/health` require an `X-API-Key` header.
+
+Set `AUDI_API_KEY` server-side (in the K8s secret or your `.env`):
+
+```bash
+# Generate a strong key
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Add it to your `.env` along with the other required vars:
+
+```env
+AUDI_USERNAME=your.email@example.com
+AUDI_PASSWORD=your_password
+AUDI_COUNTRY=DE
+AUDI_SPIN=1234
+AUDI_API_LEVEL=1
+AUDI_API_KEY=<generated_key>
+```
+
+Send the same key as a header on every call:
+
+```bash
+curl -H "X-API-Key: your_key_here" http://localhost:8000/brief
+```
+
+Without the header (or with a wrong key), endpoints return 401. If `AUDI_API_KEY` is unset on the server, all protected endpoints return 503.
+
 ### Endpoints
 
 | Method | Path | Description |

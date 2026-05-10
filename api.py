@@ -23,6 +23,7 @@ Requires: pip install fastapi uvicorn aiohttp beautifulsoup4 certifi tenacity
 import asyncio
 import logging
 import os
+import secrets
 import ssl
 import time
 from contextlib import asynccontextmanager
@@ -32,7 +33,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 import certifi
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -55,6 +56,10 @@ AUDI_PASSWORD = os.getenv("AUDI_PASSWORD", "")
 AUDI_COUNTRY = os.getenv("AUDI_COUNTRY", "DE")
 AUDI_SPIN = os.getenv("AUDI_SPIN")
 AUDI_API_LEVEL = int(os.getenv("AUDI_API_LEVEL", "1"))
+
+# API key required on all endpoints except /health.
+# When unset, protected endpoints fail-closed with 503 to avoid an open API.
+AUDI_API_KEY = os.getenv("AUDI_API_KEY", "")
 
 TZ = ZoneInfo(os.getenv("TZ", "Europe/Paris"))
 
@@ -267,6 +272,18 @@ async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
     )
 
 
+async def require_api_key(x_api_key: str = Header(default="", alias="X-API-Key")):
+    """Authn guard: every protected endpoint requires X-API-Key matching AUDI_API_KEY.
+
+    Fails closed (503) when AUDI_API_KEY is unset on the server, so a misconfigured
+    deploy can't accidentally serve an open API.
+    """
+    if not AUDI_API_KEY:
+        raise HTTPException(status_code=503, detail="API key not configured on server")
+    if not secrets.compare_digest(x_api_key, AUDI_API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+
+
 async def _require_auth():
     if not await client.ensure_auth():
         raise HTTPException(status_code=503, detail="Cannot connect to Audi Connect")
@@ -296,7 +313,7 @@ async def health(request: Request):
 
 
 # --- Vehicles ---
-@app.get("/vehicles")
+@app.get("/vehicles", dependencies=[Depends(require_api_key)])
 @limiter.limit("30/minute")
 async def list_vehicles(request: Request):
     await _require_auth()
@@ -310,7 +327,7 @@ async def list_vehicles(request: Request):
 
 
 # --- Status ---
-@app.get("/status")
+@app.get("/status", dependencies=[Depends(require_api_key)])
 @limiter.limit("30/minute")
 async def get_status(request: Request, vin: Optional[str] = Query(None, description="Filter by VIN")):
     await _require_auth()
@@ -330,7 +347,7 @@ async def get_status(request: Request, vin: Optional[str] = Query(None, descript
 
 
 # --- Brief status ---
-@app.get("/brief")
+@app.get("/brief", dependencies=[Depends(require_api_key)])
 @limiter.limit("30/minute")
 async def get_brief(request: Request, vin: Optional[str] = Query(None, description="Filter by VIN")):
     """Quick status: locked, position, range — the essentials."""
@@ -347,7 +364,7 @@ async def get_brief(request: Request, vin: Optional[str] = Query(None, descripti
 
 
 # --- Position ---
-@app.get("/position")
+@app.get("/position", dependencies=[Depends(require_api_key)])
 @limiter.limit("30/minute")
 async def get_position(request: Request, vin: Optional[str] = Query(None, description="Filter by VIN")):
     await _require_auth()
@@ -371,7 +388,7 @@ async def get_position(request: Request, vin: Optional[str] = Query(None, descri
 
 
 # --- Lock / Unlock ---
-@app.post("/{vin}/lock")
+@app.post("/{vin}/lock", dependencies=[Depends(require_api_key)])
 @limiter.limit("5/minute")
 async def lock_vehicle(request: Request, vin: str, confirm: bool = Query(False, description="Wait and confirm action status")):
     await _require_auth()
@@ -388,7 +405,7 @@ async def lock_vehicle(request: Request, vin: str, confirm: bool = Query(False, 
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/{vin}/unlock")
+@app.post("/{vin}/unlock", dependencies=[Depends(require_api_key)])
 @limiter.limit("5/minute")
 async def unlock_vehicle(request: Request, vin: str, confirm: bool = Query(False, description="Wait and confirm action status")):
     await _require_auth()
@@ -406,7 +423,7 @@ async def unlock_vehicle(request: Request, vin: str, confirm: bool = Query(False
 
 
 # --- Climate ---
-@app.post("/{vin}/climate/start")
+@app.post("/{vin}/climate/start", dependencies=[Depends(require_api_key)])
 @limiter.limit("5/minute")
 async def start_climate(request: Request, vin: str, temp: float = Query(21.0, ge=16, le=30, description="Temperature in C"), confirm: bool = Query(False)):
     await _require_auth()
@@ -421,7 +438,7 @@ async def start_climate(request: Request, vin: str, temp: float = Query(21.0, ge
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/{vin}/climate/stop")
+@app.post("/{vin}/climate/stop", dependencies=[Depends(require_api_key)])
 @limiter.limit("5/minute")
 async def stop_climate(request: Request, vin: str, confirm: bool = Query(False)):
     await _require_auth()
@@ -437,7 +454,7 @@ async def stop_climate(request: Request, vin: str, confirm: bool = Query(False))
 
 
 # --- Heater ---
-@app.post("/{vin}/heater/start")
+@app.post("/{vin}/heater/start", dependencies=[Depends(require_api_key)])
 @limiter.limit("5/minute")
 async def start_heater(request: Request, vin: str, duration: int = Query(30, ge=10, le=60, description="Duration in minutes"), confirm: bool = Query(False)):
     await _require_auth()
@@ -452,7 +469,7 @@ async def start_heater(request: Request, vin: str, duration: int = Query(30, ge=
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/{vin}/heater/stop")
+@app.post("/{vin}/heater/stop", dependencies=[Depends(require_api_key)])
 @limiter.limit("5/minute")
 async def stop_heater(request: Request, vin: str, confirm: bool = Query(False)):
     await _require_auth()
