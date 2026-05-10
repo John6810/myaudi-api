@@ -14,8 +14,12 @@ from .utils import parse_int, parse_float
 
 _LOGGER = logging.getLogger(__name__)
 
-# Retry config for vehicle actions (network errors only, not validation errors)
-_action_retry = retry(
+# Retry config for IDEMPOTENT vehicle actions only (lock, climate-stop,
+# heater-stop). End state is the same whether applied once or N times.
+# Non-idempotent actions (unlock, climate-start, heater-start) are NOT
+# retried at this layer: a duplicated send can re-trigger notifications,
+# extend the heater timer, or burn the ~6 req/h Audi budget on S-PIN tokens.
+_idempotent_action_retry = retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
     retry=retry_if_exception_type((RequestTimeoutError, ConnectionError, OSError, ClientResponseError)),
@@ -334,11 +338,12 @@ class AudiVehicle:
 
     # --- Actions ---
 
-    @_action_retry
+    @_idempotent_action_retry
     async def lock(self) -> None:
         await self._auth.set_vehicle_lock(self.vin, lock=True)
 
-    @_action_retry
+    # Not retried: unlocking twice resets auto-lock, fires duplicate
+    # notifications, and burns S-PIN security tokens against the rate budget.
     async def unlock(self) -> None:
         await self._auth.set_vehicle_lock(self.vin, lock=False)
 
@@ -347,13 +352,10 @@ class AudiVehicle:
             raise ActionFailedError(
                 f"Temperature must be between {MIN_CLIMATE_TEMP_C} and {MAX_CLIMATE_TEMP_C}°C, got {temp_c}"
             )
-        await self._do_start_climatisation(temp_c)
-
-    @_action_retry
-    async def _do_start_climatisation(self, temp_c: float) -> None:
+        # Not retried: re-sending may restart the cycle and reset target temp.
         await self._auth.start_climate_control(self.vin, temp_c=temp_c)
 
-    @_action_retry
+    @_idempotent_action_retry
     async def stop_climatisation(self) -> None:
         await self._auth.stop_climate_control(self.vin)
 
@@ -362,13 +364,10 @@ class AudiVehicle:
             raise ActionFailedError(
                 f"Duration must be between {MIN_HEATER_DURATION_MIN} and {MAX_HEATER_DURATION_MIN} min, got {duration}"
             )
-        await self._do_start_preheater(duration)
-
-    @_action_retry
-    async def _do_start_preheater(self, duration: int) -> None:
+        # Not retried: re-sending resets the heater timer (extends duration).
         await self._auth.start_preheater(self.vin, duration=duration)
 
-    @_action_retry
+    @_idempotent_action_retry
     async def stop_preheater(self) -> None:
         await self._auth.stop_preheater(self.vin)
 

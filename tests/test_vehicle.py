@@ -4,6 +4,8 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+from aiohttp import ClientResponseError
+
 from audi_connect.vehicle import (
     AudiVehicle,
     MIN_CLIMATE_TEMP_C,
@@ -11,8 +13,12 @@ from audi_connect.vehicle import (
     MIN_HEATER_DURATION_MIN,
     MAX_HEATER_DURATION_MIN,
 )
-from audi_connect.exceptions import ActionFailedError
+from audi_connect.exceptions import ActionFailedError, RequestTimeoutError
 from audi_connect.models import VehicleDataResponse
+
+
+def _http_error(status: int = 500) -> ClientResponseError:
+    return ClientResponseError(request_info=None, history=(), status=status, message="boom")
 
 
 def _make_auth_mock():
@@ -277,3 +283,105 @@ class TestPosition:
         v = _make_vehicle()
         v._position = None
         assert v.position is None
+
+
+class TestActionRetryPolicy:
+    """Verify retry is applied only to idempotent actions.
+
+    lock / stop_climatisation / stop_preheater retry up to 3x on transport
+    or 5xx errors. unlock / start_climatisation / start_preheater do NOT
+    retry — duplicates can re-trigger notifications, extend timers, or
+    burn S-PIN security tokens against the ~6 req/h Audi budget.
+    """
+
+    @pytest.mark.asyncio
+    async def test_lock_retries_on_timeout(self):
+        auth = _make_auth_mock()
+        auth.set_vehicle_lock = AsyncMock(
+            side_effect=[RequestTimeoutError("t1"), RequestTimeoutError("t2"), None]
+        )
+        v = _make_vehicle(auth=auth)
+        await v.lock()
+        assert auth.set_vehicle_lock.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_lock_retries_on_client_response_error(self):
+        auth = _make_auth_mock()
+        auth.set_vehicle_lock = AsyncMock(side_effect=_http_error(503))
+        v = _make_vehicle(auth=auth)
+        with pytest.raises(ClientResponseError):
+            await v.lock()
+        assert auth.set_vehicle_lock.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_unlock_does_not_retry_on_timeout(self):
+        auth = _make_auth_mock()
+        auth.set_vehicle_lock = AsyncMock(side_effect=RequestTimeoutError("timeout"))
+        v = _make_vehicle(auth=auth)
+        with pytest.raises(RequestTimeoutError):
+            await v.unlock()
+        assert auth.set_vehicle_lock.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_unlock_does_not_retry_on_client_response_error(self):
+        auth = _make_auth_mock()
+        auth.set_vehicle_lock = AsyncMock(side_effect=_http_error(500))
+        v = _make_vehicle(auth=auth)
+        with pytest.raises(ClientResponseError):
+            await v.unlock()
+        assert auth.set_vehicle_lock.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_start_climatisation_does_not_retry(self):
+        auth = _make_auth_mock()
+        auth.start_climate_control = AsyncMock(side_effect=_http_error(500))
+        v = _make_vehicle(auth=auth)
+        with pytest.raises(ClientResponseError):
+            await v.start_climatisation(temp_c=21.0)
+        assert auth.start_climate_control.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_start_climatisation_validation_still_raises_without_call(self):
+        auth = _make_auth_mock()
+        v = _make_vehicle(auth=auth)
+        with pytest.raises(ActionFailedError):
+            await v.start_climatisation(temp_c=10.0)  # below MIN_CLIMATE_TEMP_C
+        # Validation must short-circuit before any network call.
+        auth.start_climate_control.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stop_climatisation_retries_on_timeout(self):
+        auth = _make_auth_mock()
+        auth.stop_climate_control = AsyncMock(
+            side_effect=[RequestTimeoutError("t1"), RequestTimeoutError("t2"), None]
+        )
+        v = _make_vehicle(auth=auth)
+        await v.stop_climatisation()
+        assert auth.stop_climate_control.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_start_preheater_does_not_retry(self):
+        auth = _make_auth_mock()
+        auth.start_preheater = AsyncMock(side_effect=_http_error(500))
+        v = _make_vehicle(auth=auth)
+        with pytest.raises(ClientResponseError):
+            await v.start_preheater(duration=30)
+        assert auth.start_preheater.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_start_preheater_validation_still_raises_without_call(self):
+        auth = _make_auth_mock()
+        v = _make_vehicle(auth=auth)
+        with pytest.raises(ActionFailedError):
+            await v.start_preheater(duration=5)  # below MIN_HEATER_DURATION_MIN
+        auth.start_preheater.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stop_preheater_retries_on_timeout(self):
+        auth = _make_auth_mock()
+        auth.stop_preheater = AsyncMock(
+            side_effect=[RequestTimeoutError("t1"), RequestTimeoutError("t2"), None]
+        )
+        v = _make_vehicle(auth=auth)
+        await v.stop_preheater()
+        assert auth.stop_preheater.await_count == 3
