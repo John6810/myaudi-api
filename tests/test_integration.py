@@ -13,6 +13,7 @@ from aioresponses import aioresponses
 from audi_connect.api import AudiAPI
 from audi_connect.client import AudiVehicleClient
 from audi_connect.actions import AudiVehicleActions
+from audi_connect.endpoints import AudiEndpoints
 from audi_connect.exceptions import RequestTimeoutError
 
 
@@ -33,9 +34,15 @@ async def api(session):
 
 
 @pytest_asyncio.fixture
-async def client(api):
+async def endpoints(api):
+    return AudiEndpoints(api, country="DE", api_level=1)
+
+
+@pytest_asyncio.fixture
+async def client(api, endpoints):
     return AudiVehicleClient(
         api=api,
+        endpoints=endpoints,
         bearer_token={"access_token": "test_bearer"},
         vw_token={"access_token": "test_vw"},
         audi_token={"access_token": "test_audi"},
@@ -47,10 +54,10 @@ async def client(api):
 
 
 @pytest_asyncio.fixture
-async def actions(api, client):
+async def actions(api, endpoints):
     return AudiVehicleActions(
         api=api,
-        client=client,
+        endpoints=endpoints,
         bearer_token={"access_token": "test_bearer"},
         vw_token={"access_token": "test_vw"},
         xclient_id="test_xclient",

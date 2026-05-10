@@ -110,7 +110,7 @@ python main.py status --vin WAUXXXXXXXXXXXXX
 ### Run locally
 
 ```bash
-uvicorn api:app --host 0.0.0.0 --port 8000
+uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
 ### Run with Docker
@@ -331,7 +331,7 @@ command_line:
 
 ```
 myaudi-api/
-  api.py                   # FastAPI REST API (cache, webhooks, confirm)
+  server.py                # FastAPI REST API (cache, webhooks, confirm)
   main.py                  # CLI (setup, status, watch, actions)
   ha_sensor.py             # Home Assistant script
   Dockerfile

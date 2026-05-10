@@ -9,13 +9,15 @@ from audi_connect.exceptions import SpinRequiredError
 
 def _make_actions(spin="1234", api_level=1):
     api = AsyncMock()
-    client = AsyncMock()
-    client._get_home_region = AsyncMock(return_value="https://mal-3a.prd.eu.dp.vwg-connect.com")
-    client._get_home_region_setter = AsyncMock(return_value="https://mal-3a.prd.eu.dp.vwg-connect.com")
-    client._get_cariad_url_for_vin = MagicMock(side_effect=lambda vin, path, **kw: f"https://emea.bff.cariad.digital/vehicle/v1/vehicles/{vin}/{path}")
+    endpoints = AsyncMock()
+    endpoints.home_region = AsyncMock(return_value="https://mal-3a.prd.eu.dp.vwg-connect.com")
+    endpoints.home_region_setter = AsyncMock(return_value="https://mal-3a.prd.eu.dp.vwg-connect.com")
+    endpoints.cariad_url_for_vin = MagicMock(
+        side_effect=lambda vin, path, **kw: f"https://emea.bff.cariad.digital/vehicle/v1/vehicles/{vin}/{path}"
+    )
     return AudiVehicleActions(
         api=api,
-        client=client,
+        endpoints=endpoints,
         bearer_token={"access_token": "bearer_test", "id_token": "id_test"},
         vw_token={"access_token": "vw_test"},
         xclient_id="xclient_test",

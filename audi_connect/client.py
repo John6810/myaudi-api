@@ -6,6 +6,7 @@ from datetime import timedelta, datetime, timezone
 from typing import Optional
 
 from .api import AudiAPI
+from .endpoints import AudiEndpoints
 from .exceptions import AuthenticationError
 
 _LOGGER = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ class AudiVehicleClient:
     def __init__(
         self,
         api: AudiAPI,
+        endpoints: AudiEndpoints,
         bearer_token: dict,
         vw_token: dict,
         audi_token: dict,
@@ -26,6 +28,7 @@ class AudiVehicleClient:
         api_level: int,
     ):
         self._api = api
+        self._endpoints = endpoints
         self._bearer_token = bearer_token
         self._vw_token = vw_token
         self._audi_token = audi_token
@@ -34,19 +37,6 @@ class AudiVehicleClient:
         self._language = language
         self._type = "Audi"
         self._api_level = api_level
-        self._home_region: dict[str, str] = {}
-        self._home_region_setter: dict[str, str] = {}
-
-    def _get_cariad_url(self, path_and_query: str, **kwargs) -> str:
-        region = "emea" if self._country.upper() != "US" else "na"
-        base_url = f"https://{region}.bff.cariad.digital"
-        action_path = path_and_query.format(**kwargs)
-        return base_url.rstrip("/") + "/" + action_path.lstrip("/")
-
-    def _get_cariad_url_for_vin(self, vin: str, path_and_query: str, **kwargs) -> str:
-        base_url = self._get_cariad_url("/vehicle/v1/vehicles/{vin}", vin=vin.upper())
-        action_path = path_and_query.format(**kwargs)
-        return base_url.rstrip("/") + "/" + action_path.lstrip("/")
 
     async def get_vehicle_list(self) -> list[dict]:
         """Fetch the list of vehicles from the GraphQL API."""
@@ -104,7 +94,7 @@ class AudiVehicleClient:
         }
         self._api.use_token(self._bearer_token)
         return await self._api.get(
-            self._get_cariad_url_for_vin(
+            self._endpoints.cariad_url_for_vin(
                 vin, "selectivestatus?jobs={jobs}", jobs=",".join(jobs)
             )
         )
@@ -114,7 +104,7 @@ class AudiVehicleClient:
         self._api.use_token(self._bearer_token)
         try:
             return await self._api.get(
-                self._get_cariad_url_for_vin(vin, "parkingposition")
+                self._endpoints.cariad_url_for_vin(vin, "parkingposition")
             )
         except Exception:
             return None
@@ -141,47 +131,8 @@ class AudiVehicleClient:
         return await self._api.request(
             "GET",
             "{home}/api/bs/tripstatistics/v1/vehicles/{vin}/tripdata/{kind}".format(
-                home=await self._get_home_region_setter(vin.upper()),
+                home=await self._endpoints.home_region_setter(vin.upper()),
                 vin=vin.upper(), kind=kind,
             ),
             None, params=td_reqdata, headers=headers,
         )
-
-    # --- Home region resolution ---
-
-    async def _fill_home_region(self, vin: str) -> None:
-        if self._country.upper() != "US" and self._api_level == 1:
-            self._home_region[vin] = "https://mal-3a.prd.eu.dp.vwg-connect.com"
-            self._home_region_setter[vin] = "https://mal-3a.prd.eu.dp.vwg-connect.com"
-            return
-
-        self._home_region[vin] = "https://msg.volkswagen.de"
-        self._home_region_setter[vin] = "https://mal-1a.prd.ece.vwg-connect.com"
-
-        try:
-            self._api.use_token(self._vw_token)
-            res = await self._api.get(
-                f"https://mal-1a.prd.ece.vwg-connect.com/api/cs/vds/v1/vehicles/{vin}/homeRegion"
-            )
-            if (
-                res is not None
-                and res.get("homeRegion") is not None
-                and res["homeRegion"].get("baseUri") is not None
-                and res["homeRegion"]["baseUri"].get("content") is not None
-            ):
-                uri = res["homeRegion"]["baseUri"]["content"]
-                if uri != "https://mal-1a.prd.ece.vwg-connect.com/api":
-                    self._home_region_setter[vin] = uri.split("/api")[0]
-                    self._home_region[vin] = self._home_region_setter[vin].replace("mal-", "fal-")
-        except Exception:
-            pass
-
-    async def _get_home_region(self, vin: str) -> str:
-        if self._home_region.get(vin) is None:
-            await self._fill_home_region(vin)
-        return self._home_region[vin]
-
-    async def _get_home_region_setter(self, vin: str) -> str:
-        if self._home_region_setter.get(vin) is None:
-            await self._fill_home_region(vin)
-        return self._home_region_setter[vin]

@@ -6,7 +6,9 @@ from typing import Optional
 from .api import AudiAPI
 from .client import AudiVehicleClient
 from .actions import AudiVehicleActions
+from .endpoints import AudiEndpoints
 from .oauth import AudiOAuth
+from .oauth_state import OAuthState
 from .token_store import TokenStore
 from .exceptions import AuthenticationError, TokenRefreshError
 
@@ -23,27 +25,14 @@ class AudiAuth:
         self._spin = spin
         self._api_level = api_level if api_level is not None else 0
         self._token_store = token_store or TokenStore()
+        self._endpoints = AudiEndpoints(api, country=self._country, api_level=self._api_level)
         self._oauth = AudiOAuth(api, country)
 
-        # OAuth state
-        self.mbb_oauth_base_url: Optional[str] = None
-        self.mbb_oauth_token: Optional[dict] = None
-        self.xclient_id: Optional[str] = None
-        self._token_endpoint: str = ""
-        self._bearer_token_json: Optional[dict] = None
-        self._client_id: str = ""
-        self._authorization_server_base_url: str = ""
-
-        # Tokens
-        self.vw_token: Optional[dict] = None
-        self.audi_token: Optional[dict] = None
+        self._state: Optional[OAuthState] = None
 
         # Delegates (created after login)
         self._client: Optional[AudiVehicleClient] = None
         self._actions: Optional[AudiVehicleActions] = None
-
-        # Cached vehicle list from token validation
-        self._cached_vehicle_list: Optional[list[dict]] = None
 
     @property
     def client(self) -> AudiVehicleClient:
@@ -57,38 +46,51 @@ class AudiAuth:
             raise AuthenticationError("Not authenticated - call login() first")
         return self._actions
 
-    def _apply_tokens(self, tokens: dict) -> None:
-        """Apply a token dict (from login or cache) to internal state."""
-        self._bearer_token_json = tokens["bearer_token"]
-        self.audi_token = tokens["audi_token"]
-        self.vw_token = tokens["vw_token"]
-        self.mbb_oauth_token = tokens["mbb_oauth_token"]
-        self.xclient_id = tokens["xclient_id"]
-        self._client_id = tokens["client_id"]
-        self._token_endpoint = tokens["token_endpoint"]
-        self._authorization_server_base_url = tokens["authorization_server_base_url"]
-        self.mbb_oauth_base_url = tokens["mbb_oauth_base_url"]
-        self._language = tokens["language"]
-        self._api.set_xclient_id(self.xclient_id)
+    # --- Backwards-compat property proxies (read-only) ---
+    # TODO: remove in a follow-up once external readers are gone.
+    @property
+    def vw_token(self) -> Optional[dict]:
+        return self._state.vw_token if self._state else None
+
+    @property
+    def audi_token(self) -> Optional[dict]:
+        return self._state.audi_token if self._state else None
+
+    @property
+    def mbb_oauth_token(self) -> Optional[dict]:
+        return self._state.mbb_oauth_token if self._state else None
+
+    @property
+    def xclient_id(self) -> Optional[str]:
+        return self._state.xclient_id if self._state else None
+
+    def _set_state(self, state: OAuthState) -> None:
+        """Adopt a new OAuth state and propagate to api and endpoints."""
+        self._state = state
+        self._language = state.language
+        self._api.set_xclient_id(state.xclient_id)
 
     def _build_delegates(self) -> None:
         """Create client and actions instances after successful auth."""
+        assert self._state is not None
+        self._endpoints.set_vw_token(self._state.vw_token)
         self._client = AudiVehicleClient(
             api=self._api,
-            bearer_token=self._bearer_token_json,
-            vw_token=self.vw_token,
-            audi_token=self.audi_token,
-            xclient_id=self.xclient_id,
+            endpoints=self._endpoints,
+            bearer_token=self._state.bearer_token,
+            vw_token=self._state.vw_token,
+            audi_token=self._state.audi_token,
+            xclient_id=self._state.xclient_id,
             country=self._country,
             language=self._language,
             api_level=self._api_level,
         )
         self._actions = AudiVehicleActions(
             api=self._api,
-            client=self._client,
-            bearer_token=self._bearer_token_json,
-            vw_token=self.vw_token,
-            xclient_id=self.xclient_id,
+            endpoints=self._endpoints,
+            bearer_token=self._state.bearer_token,
+            vw_token=self._state.vw_token,
+            xclient_id=self._state.xclient_id,
             country=self._country,
             spin=self._spin,
             api_level=self._api_level,
@@ -97,10 +99,6 @@ class AudiAuth:
     # --- Convenience methods (delegate to client/actions) ---
 
     async def get_vehicle_list(self) -> list[dict]:
-        if self._cached_vehicle_list is not None:
-            result = self._cached_vehicle_list
-            self._cached_vehicle_list = None
-            return result
         return await self.client.get_vehicle_list()
 
     async def get_stored_vehicle_data(self, vin: str) -> dict:
@@ -136,7 +134,7 @@ class AudiAuth:
             return False
 
         try:
-            self._apply_tokens(cached)
+            self._set_state(OAuthState.from_dict(cached))
             self._build_delegates()
             _LOGGER.info("Restored tokens from cache")
             return True
@@ -147,28 +145,21 @@ class AudiAuth:
 
     def _save_tokens(self) -> None:
         """Persist current tokens to cache."""
-        self._token_store.save(
-            bearer_token=self._bearer_token_json,
-            audi_token=self.audi_token,
-            vw_token=self.vw_token,
-            mbb_oauth_token=self.mbb_oauth_token,
-            xclient_id=self.xclient_id,
-            client_id=self._client_id,
-            token_endpoint=self._token_endpoint,
-            authorization_server_base_url=self._authorization_server_base_url,
-            mbb_oauth_base_url=self.mbb_oauth_base_url,
-            language=self._language,
-        )
+        if self._state is not None:
+            self._token_store.save(self._state)
 
     # --- Login ---
 
-    async def login(self, user: str, password: str) -> None:
-        """Full authentication flow (13 steps). Uses cached tokens if available."""
+    async def login(self, user: str, password: str) -> list[dict]:
+        """Full authentication flow (13 steps). Uses cached tokens if available.
+
+        Returns the validated vehicle list (so callers can avoid an extra
+        get_vehicle_list() round-trip; the list is fetched as part of token
+        validation either way).
+        """
         if self._try_restore_tokens():
-            # Validate cached tokens by fetching vehicle list
             try:
-                self._cached_vehicle_list = await self.client.get_vehicle_list()
-                return
+                return await self.client.get_vehicle_list()
             except Exception as e:
                 _LOGGER.info("Cached tokens expired or invalid: %s. Re-authenticating...", e)
                 self._token_store.clear()
@@ -177,11 +168,11 @@ class AudiAuth:
 
         _LOGGER.info("Starting login to Audi Connect...")
         tokens = await self._oauth.login(user, password)
-        self._apply_tokens(tokens)
-        self._api.set_xclient_id(self.xclient_id)
+        self._set_state(OAuthState.from_dict(tokens))
         self._build_delegates()
         self._save_tokens()
         _LOGGER.info("Login successful!")
+        return await self.client.get_vehicle_list()
 
     async def refresh_tokens(self, elapsed_sec: int) -> bool:
         """Refresh all tokens if they are about to expire.
@@ -191,31 +182,27 @@ class AudiAuth:
         which burns ~10 upstream round-trips per cycle. Calling this method
         instead would cost only 3 (MBB + IDK + AZS).
         """
-        if self.mbb_oauth_token is None:
+        if self._state is None or self._state.mbb_oauth_token is None:
             return False
-        if "refresh_token" not in self.mbb_oauth_token:
+        if "refresh_token" not in self._state.mbb_oauth_token:
             return False
-        if "expires_in" not in self.mbb_oauth_token:
+        if "expires_in" not in self._state.mbb_oauth_token:
             return False
-        if (elapsed_sec + 5 * 60) < self.mbb_oauth_token["expires_in"]:
+        if (elapsed_sec + 5 * 60) < self._state.mbb_oauth_token["expires_in"]:
             return False
 
         try:
             _LOGGER.info("Refreshing tokens...")
-            tokens = await self._oauth.refresh_tokens(
-                mbb_oauth_token=self.mbb_oauth_token,
-                bearer_token=self._bearer_token_json,
-                client_id=self._client_id,
-                token_endpoint=self._token_endpoint,
-                authorization_server_base_url=self._authorization_server_base_url,
-                mbb_oauth_base_url=self.mbb_oauth_base_url,
-                xclient_id=self.xclient_id,
+            refreshed = await self._oauth.refresh_tokens(
+                mbb_oauth_token=self._state.mbb_oauth_token,
+                bearer_token=self._state.bearer_token,
+                client_id=self._state.client_id,
+                token_endpoint=self._state.token_endpoint,
+                authorization_server_base_url=self._state.authorization_server_base_url,
+                mbb_oauth_base_url=self._state.mbb_oauth_base_url,
+                xclient_id=self._state.xclient_id,
             )
-            self._bearer_token_json = tokens["bearer_token"]
-            self.audi_token = tokens["audi_token"]
-            self.vw_token = tokens["vw_token"]
-            self.mbb_oauth_token = tokens["mbb_oauth_token"]
-
+            self._set_state(self._state.with_refresh(refreshed))
             self._build_delegates()
             self._save_tokens()
             _LOGGER.info("Token refresh successful!")

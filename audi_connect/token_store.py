@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from .oauth_state import OAuthState
+
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TOKEN_FILE = os.path.join(Path.home(), ".audi_connect_tokens.json")
@@ -25,33 +27,15 @@ class TokenStore:
     def __init__(self, filepath: str = DEFAULT_TOKEN_FILE):
         self._filepath = filepath
 
-    def save(
-        self,
-        bearer_token: dict,
-        audi_token: dict,
-        vw_token: dict,
-        mbb_oauth_token: dict,
-        xclient_id: str,
-        client_id: str,
-        token_endpoint: str,
-        authorization_server_base_url: str,
-        mbb_oauth_base_url: str,
-        language: str,
-    ) -> None:
-        """Save all tokens and OAuth state to disk."""
-        data = {
-            "bearer_token": bearer_token,
-            "audi_token": audi_token,
-            "vw_token": vw_token,
-            "mbb_oauth_token": mbb_oauth_token,
-            "xclient_id": xclient_id,
-            "client_id": client_id,
-            "token_endpoint": token_endpoint,
-            "authorization_server_base_url": authorization_server_base_url,
-            "mbb_oauth_base_url": mbb_oauth_base_url,
-            "language": language,
-            "saved_at": time.time(),
-        }
+    def save(self, state: OAuthState) -> None:
+        """Save the OAuth state to disk.
+
+        Adds a ``saved_at`` timestamp so :meth:`load` can enforce a max age.
+        The on-disk JSON shape matches the pre-OAuthState format (10 token
+        fields + ``saved_at``), so existing files migrate silently.
+        """
+        data = state.to_dict()
+        data["saved_at"] = time.time()
         try:
             with open(self._filepath, "w") as f:
                 json.dump(data, f, default=str)
