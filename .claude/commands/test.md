@@ -3,7 +3,7 @@ description: Run the project's test suite (pytest)
 allowed-tools: Bash(python -m pytest*)
 ---
 
-Run the full test suite with verbose output. The baseline is 145 tests passing.
+Run the full test suite with verbose output. The baseline is 183 tests passing.
 
 If the user passes arguments via `$ARGUMENTS`, forward them to pytest. Otherwise run the default.
 
@@ -12,4 +12,4 @@ If the user passes arguments via `$ARGUMENTS`, forward them to pytest. Otherwise
 After the run:
 - If all tests pass, summarize: "✅ N tests passed in Xs"
 - If any failed, list the failures with their assertion errors and propose a fix
-- If the count is below 145, that's a regression — flag it
+- If the count is below 183, that's a regression — flag it

@@ -36,7 +36,7 @@ python -m pytest tests/ -v
 
 - Unit tests: `unittest.mock` / `AsyncMock`
 - Integration tests: `aioresponses` for HTTP mocking
-- Target: maintain 145+ tests passing
+- Target: maintain 183+ tests passing
 
 ## Reporting Bugs
 
