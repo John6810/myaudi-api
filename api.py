@@ -21,6 +21,9 @@ Requires: pip install fastapi uvicorn aiohttp beautifulsoup4 certifi tenacity
 """
 
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
 import os
 import secrets
@@ -72,6 +75,11 @@ DATA_CACHE_TTL = int(os.getenv("AUDI_CACHE_TTL", "14400"))
 # Webhook URL for state change notifications (optional)
 WEBHOOK_URL = os.getenv("AUDI_WEBHOOK_URL")
 
+# Optional HMAC-SHA256 signing secret for outgoing webhooks. When set, every
+# webhook POST carries an X-Audi-Signature: sha256=<hex> header computed over
+# the raw request body. The receiver must verify on the raw body.
+WEBHOOK_SECRET = os.getenv("AUDI_WEBHOOK_SECRET", "")
+
 # Watch interval for background polling (default: 0 = disabled)
 # Audi's API has aggressive rate limits (~6 req/hour). Enforcing a 15 min minimum
 # to avoid account lockout. Set to 0 to disable background polling entirely.
@@ -87,6 +95,17 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+from audi_connect.logging_utils import RedactingFilter
+for _h in logging.getLogger().handlers:
+    _h.addFilter(RedactingFilter())
+
+# Belt-and-suspenders: pin aiohttp loggers to WARNING regardless of root level,
+# in case aiohttp adds verbose client logging in future versions or someone
+# enables DEBUG on the root logger.
+for _name in ("aiohttp.client", "aiohttp.internal", "aiohttp.web", "aiohttp.access"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
+
 log = logging.getLogger("audi-api")
 
 if _raw_watch_interval > 0 and _raw_watch_interval < MIN_WATCH_INTERVAL:
@@ -198,12 +217,24 @@ _watcher_task: Optional[asyncio.Task] = None
 
 
 async def _send_webhook(payload: dict) -> None:
-    """POST a JSON payload to the configured webhook URL."""
+    """POST a JSON payload to the configured webhook URL.
+
+    Signs the request with HMAC-SHA256 over the raw body when AUDI_WEBHOOK_SECRET
+    is set; otherwise sends an unsigned request (backwards compatible default).
+    """
     if not WEBHOOK_URL:
         return
+    body = json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if WEBHOOK_SECRET:
+        sig = hmac.new(WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        headers["X-Audi-Signature"] = f"sha256={sig}"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(WEBHOOK_URL, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.post(
+                WEBHOOK_URL, data=body, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
                 if resp.status >= 300:
                     log.warning("Webhook returned HTTP %d", resp.status)
     except Exception as e:

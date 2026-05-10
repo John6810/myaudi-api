@@ -258,6 +258,27 @@ Set `AUDI_WEBHOOK_URL` and `AUDI_WATCH_INTERVAL` to enable background monitoring
 
 Works with n8n, Home Assistant webhooks, Discord webhooks, or any HTTP endpoint.
 
+### Webhook signing (optional)
+
+Set `AUDI_WEBHOOK_SECRET` to enable HMAC-SHA256 signing. Each request will include an `X-Audi-Signature: sha256=<hex>` header computed over the raw request body. The receiver must recompute the HMAC over the raw body and reject mismatches.
+
+Example n8n verification (Function node — webhook node must be configured to use **raw body**, otherwise n8n re-serialises the payload and the signature won't match):
+
+```javascript
+const crypto = require('crypto');
+const secret = $env.AUDI_WEBHOOK_SECRET;
+const sig = $request.headers['x-audi-signature'];
+const expected = 'sha256=' + crypto
+  .createHmac('sha256', secret)
+  .update($request.body.raw)
+  .digest('hex');
+if (!sig || !crypto.timingSafeEqual(
+    Buffer.from(sig), Buffer.from(expected))) {
+  throw new Error('Invalid signature');
+}
+return items;
+```
+
 ## Home Assistant Integration
 
 The `ha_sensor.py` script outputs vehicle data as JSON to stdout, compatible with Home Assistant's `command_line` sensor:
