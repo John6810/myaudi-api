@@ -6,3 +6,4 @@ tenacity>=8.2.0
 fastapi>=0.135,<1
 uvicorn>=0.42,<1
 slowapi>=0.1.9
+prometheus-fastapi-instrumentator>=7.0,<8

@@ -20,7 +20,27 @@ Endpoints:
 Requires: pip install fastapi uvicorn aiohttp beautifulsoup4 certifi tenacity
 """
 
+# ---------------------------------------------------------------------------
+# SINGLE-REPLICA INVARIANT — DO NOT scale this Deployment beyond replicas: 1.
+#
+# This service holds in-process state that is NOT safe to run concurrently:
+#   * AudiClient (module-global) — caches OAuth tokens, vehicle data, and a
+#     ~4h response cache. Two replicas would each hit Audi independently and
+#     rapidly exceed the ~6 req/hour upstream rate limit, locking the account.
+#   * slowapi Limiter — default in-memory backend; per-replica counters break
+#     the documented 30/min-read, 5/min-write quotas.
+#   * _background_watcher — one polling loop per replica = 2x the budget.
+#   * TokenStore — writes ~/.audi_connect_tokens.json inside the container's
+#     filesystem; two replicas would race on the same path on shared volumes
+#     and diverge on ephemeral ones.
+#
+# If you ever need HA, you must first: move the cache + rate limiter to Redis,
+# move tokens to a shared store (Secret/CRD/Redis), and gate the watcher
+# behind leader election. None of that is implemented here. Keep replicas: 1.
+# ---------------------------------------------------------------------------
+
 import asyncio
+import contextvars
 import hashlib
 import hmac
 import json
@@ -29,6 +49,7 @@ import os
 import secrets
 import ssl
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
@@ -38,9 +59,12 @@ import aiohttp
 import certifi
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from prometheus_client import Counter, Histogram
+from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from audi_connect.api import AudiAPI
 from audi_connect.auth import AudiAuth
@@ -92,9 +116,27 @@ else:
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s [%(levelname)s] [rid=%(request_id)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+# Request-ID propagation: contextvar set by middleware, read by filter at log-emit
+# time. Defined and installed BEFORE any log call so the format string's
+# %(request_id)s always resolves (otherwise the watch-interval warning below
+# would crash with KeyError before the middleware ever runs).
+request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
+
+
+class RequestIdFilter(logging.Filter):
+    """Stamp record.request_id from the contextvar so the format string can render it."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = request_id_ctx.get()
+        return True
+
+
+for _h in logging.getLogger().handlers:
+    _h.addFilter(RequestIdFilter())
 
 from audi_connect.logging_utils import RedactingFilter
 for _h in logging.getLogger().handlers:
@@ -114,6 +156,32 @@ if _raw_watch_interval > 0 and _raw_watch_interval < MIN_WATCH_INTERVAL:
         "Clamped to %ds to avoid account lockout.",
         _raw_watch_interval, MIN_WATCH_INTERVAL, WATCH_INTERVAL,
     )
+
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics (business-level — HTTP metrics added by Instrumentator)
+# ---------------------------------------------------------------------------
+audi_auth_refresh_total = Counter(
+    "audi_auth_refresh_total",
+    "Audi Connect login or token-refresh attempts.",
+    ["result"],
+)
+audi_cache_operation_total = Counter(
+    "audi_cache_operation_total",
+    "Vehicle data cache events.",
+    ["operation"],
+)
+audi_action_total = Counter(
+    "audi_action_total",
+    "Remote vehicle actions issued to Audi Connect.",
+    ["action", "result"],
+)
+audi_backend_request_duration_seconds = Histogram(
+    "audi_backend_request_duration_seconds",
+    "Latency of upstream Audi/CARIAD calls as seen by this service.",
+    ["endpoint"],
+    buckets=(0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 30.0, 60.0),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +217,7 @@ class AudiClient:
     async def login(self) -> bool:
         """Full authentication flow."""
         log.info("Connecting to Audi Connect (%s)...", AUDI_USERNAME)
+        t0 = time.time()
         try:
             if self._session is None:
                 ssl_ctx = ssl.create_default_context(cafile=certifi.where())
@@ -165,22 +234,29 @@ class AudiClient:
             self.authenticated = True
             self._auth_time = time.time()
             log.info("Authenticated — %d vehicle(s)", len(self.vehicles))
+            audi_auth_refresh_total.labels(result="success").inc()
+            audi_backend_request_duration_seconds.labels(endpoint="login").observe(time.time() - t0)
             return True
 
         except Exception as e:
             log.error("Authentication failed: %s", e)
             self.authenticated = False
+            audi_auth_refresh_total.labels(result="failure").inc()
             return False
 
     async def update_vehicles(self, force: bool = False) -> None:
         """Update all vehicles data, respecting cache TTL."""
         now = time.time()
         if not force and (now - self._last_update) < DATA_CACHE_TTL:
+            audi_cache_operation_total.labels(operation="hit").inc()
             return
         async with self._update_lock:
             # Double-check after acquiring lock
             if not force and (time.time() - self._last_update) < DATA_CACHE_TTL:
+                audi_cache_operation_total.labels(operation="hit").inc()
                 return
+            audi_cache_operation_total.labels(operation="miss").inc()
+            t0 = time.time()
             log.info("Updating vehicle data%s...", " (forced)" if force else " (cache expired)")
             for vehicle in self.vehicles:
                 try:
@@ -188,10 +264,12 @@ class AudiClient:
                 except Exception as e:
                     log.error("Failed to update %s: %s", vehicle.vin, e)
             self._last_update = time.time()
+            audi_backend_request_duration_seconds.labels(endpoint="update").observe(time.time() - t0)
             log.info("Vehicle data cached for %ds", DATA_CACHE_TTL)
 
     def invalidate_cache(self) -> None:
         """Force next update_vehicles() call to refresh data."""
+        audi_cache_operation_total.labels(operation="invalidate").inc()
         self._last_update = 0.0
 
     def get_vehicle(self, vin: str) -> Optional[AudiVehicle]:
@@ -286,13 +364,38 @@ async def lifespan(app: FastAPI):
 
 limiter = Limiter(key_func=get_remote_address)
 
+
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    """Attach an X-Request-ID to every request and propagate it via contextvar.
+
+    Uses a client-provided X-Request-ID when present, otherwise generates a
+    12-hex-char uuid. The same value is echoed back in the response header.
+    """
+
+    async def dispatch(self, request, call_next):
+        rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
+        token = request_id_ctx.set(rid)
+        try:
+            response = await call_next(request)
+            response.headers["X-Request-ID"] = rid
+            return response
+        finally:
+            request_id_ctx.reset(token)
+
+
 app = FastAPI(
     title="Audi Connect API",
     description="Internal API for Audi Connect vehicle management",
     version="1.0.0",
     lifespan=lifespan,
 )
+app.add_middleware(RequestIdMiddleware)
 app.state.limiter = limiter
+
+Instrumentator(
+    should_group_status_codes=True,
+    excluded_handlers=["/metrics", "/health", "/ready"],
+).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 
 @app.exception_handler(RateLimitExceeded)
@@ -341,6 +444,15 @@ async def health(request: Request):
         "cache_age": cache_age,
         "timestamp": datetime.now(TZ).isoformat(),
     }
+
+
+# --- Readiness ---
+@app.get("/ready")
+async def ready(request: Request):
+    """Readiness probe — strict. 503 if not authenticated to Audi Connect."""
+    if not client.authenticated:
+        raise HTTPException(status_code=503, detail="Not authenticated to Audi Connect")
+    return {"status": "ready"}
 
 
 # --- Vehicles ---
@@ -425,7 +537,7 @@ async def lock_vehicle(request: Request, vin: str, confirm: bool = Query(False, 
     await _require_auth()
     vehicle = _get_vehicle_or_404(vin)
     try:
-        await vehicle.lock()
+        await _track_action("lock", vehicle, vehicle.lock())
         result = {"status": "sent", "action": "lock", "vin": vehicle.vin}
         if confirm:
             result.update(await _confirm_action(vehicle, "doors_trunk", "Locked"))
@@ -442,7 +554,7 @@ async def unlock_vehicle(request: Request, vin: str, confirm: bool = Query(False
     await _require_auth()
     vehicle = _get_vehicle_or_404(vin)
     try:
-        await vehicle.unlock()
+        await _track_action("unlock", vehicle, vehicle.unlock())
         result = {"status": "sent", "action": "unlock", "vin": vehicle.vin}
         if confirm:
             result.update(await _confirm_action(vehicle, "doors_trunk", "Closed"))
@@ -460,7 +572,7 @@ async def start_climate(request: Request, vin: str, temp: float = Query(21.0, ge
     await _require_auth()
     vehicle = _get_vehicle_or_404(vin)
     try:
-        await vehicle.start_climatisation(temp_c=temp)
+        await _track_action("climate_start", vehicle, vehicle.start_climatisation(temp_c=temp))
         result = {"status": "sent", "action": "climate_start", "temperature": temp, "vin": vehicle.vin}
         if confirm:
             result.update(await _confirm_action(vehicle, "climatisation", None))
@@ -475,7 +587,7 @@ async def stop_climate(request: Request, vin: str, confirm: bool = Query(False))
     await _require_auth()
     vehicle = _get_vehicle_or_404(vin)
     try:
-        await vehicle.stop_climatisation()
+        await _track_action("climate_stop", vehicle, vehicle.stop_climatisation())
         result = {"status": "sent", "action": "climate_stop", "vin": vehicle.vin}
         if confirm:
             result.update(await _confirm_action(vehicle, "climatisation", None))
@@ -491,7 +603,7 @@ async def start_heater(request: Request, vin: str, duration: int = Query(30, ge=
     await _require_auth()
     vehicle = _get_vehicle_or_404(vin)
     try:
-        await vehicle.start_preheater(duration=duration)
+        await _track_action("heater_start", vehicle, vehicle.start_preheater(duration=duration))
         result = {"status": "sent", "action": "heater_start", "duration": duration, "vin": vehicle.vin}
         if confirm:
             result.update(await _confirm_action(vehicle, None, None))
@@ -506,7 +618,7 @@ async def stop_heater(request: Request, vin: str, confirm: bool = Query(False)):
     await _require_auth()
     vehicle = _get_vehicle_or_404(vin)
     try:
-        await vehicle.stop_preheater()
+        await _track_action("heater_stop", vehicle, vehicle.stop_preheater())
         result = {"status": "sent", "action": "heater_stop", "vin": vehicle.vin}
         if confirm:
             result.update(await _confirm_action(vehicle, None, None))
@@ -532,6 +644,19 @@ async def _confirm_action(vehicle: AudiVehicle, check_field: Optional[str], expe
     except Exception as e:
         log.warning("Could not confirm action: %s", e)
         return {"status": "sent_unconfirmed", "detail": str(e)}
+
+
+async def _track_action(action: str, vehicle: AudiVehicle, coro):
+    """Wrap an action coroutine to emit Prometheus metrics."""
+    t0 = time.time()
+    try:
+        await coro
+    except Exception:
+        audi_action_total.labels(action=action, result="failure").inc()
+        raise
+    finally:
+        audi_backend_request_duration_seconds.labels(endpoint=action).observe(time.time() - t0)
+    audi_action_total.labels(action=action, result="success").inc()
 
 
 # ---------------------------------------------------------------------------
