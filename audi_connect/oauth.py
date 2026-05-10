@@ -15,6 +15,7 @@ import hmac
 from bs4 import BeautifulSoup
 
 from .api import AudiAPI
+from .endpoints import cariad_url
 from .exceptions import AuthenticationError, CountryNotSupportedError
 
 _LOGGER = logging.getLogger(__name__)
@@ -56,10 +57,8 @@ class AudiOAuth:
             raise AuthenticationError("Unknown form action: " + action)
 
     def _get_cariad_url(self, path_and_query: str, **kwargs) -> str:
-        region = "emea" if self._country.upper() != "US" else "na"
-        base_url = f"https://{region}.bff.cariad.digital"
-        action_path = path_and_query.format(**kwargs)
-        return base_url.rstrip("/") + "/" + action_path.lstrip("/")
+        # Thin wrapper so existing tests calling oauth._get_cariad_url(...) keep passing.
+        return cariad_url(self._country, path_and_query, **kwargs)
 
     @staticmethod
     def _calculate_x_qmauth() -> str:

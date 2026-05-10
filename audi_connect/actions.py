@@ -6,7 +6,7 @@ from hashlib import sha512
 from typing import Optional
 
 from .api import AudiAPI
-from .client import AudiVehicleClient
+from .endpoints import AudiEndpoints
 from .exceptions import SpinRequiredError
 from .utils import to_byte_array
 
@@ -19,7 +19,7 @@ class AudiVehicleActions:
     def __init__(
         self,
         api: AudiAPI,
-        client: AudiVehicleClient,
+        endpoints: AudiEndpoints,
         bearer_token: dict,
         vw_token: dict,
         xclient_id: str,
@@ -28,7 +28,7 @@ class AudiVehicleActions:
         api_level: int,
     ):
         self._api = api
-        self._client = client
+        self._endpoints = endpoints
         self._bearer_token = bearer_token
         self._vw_token = vw_token
         self._xclient_id = xclient_id
@@ -48,7 +48,7 @@ class AudiVehicleActions:
         await self._api.request(
             "POST",
             "{home}/api/bs/rlu/v1/vehicles/{vin}/{action}".format(
-                home=await self._client._get_home_region_setter(vin.upper()),
+                home=await self._endpoints.home_region_setter(vin.upper()),
                 vin=vin.upper(),
                 action="lock" if lock else "unlock",
             ),
@@ -73,7 +73,7 @@ class AudiVehicleActions:
             headers = {"Authorization": "Bearer " + self._bearer_token["access_token"]}
             await self._api.request(
                 "POST",
-                self._client._get_cariad_url_for_vin(vin, "climatisation/start"),
+                self._endpoints.cariad_url_for_vin(vin, "climatisation/start"),
                 headers=headers, data=data,
             )
         else:
@@ -98,7 +98,7 @@ class AudiVehicleActions:
             await self._api.request(
                 "POST",
                 "{home}/fs-car/bs/climatisation/v1/{type}/{country}/vehicles/{vin}/climater/actions".format(
-                    home=await self._client._get_home_region(vin.upper()),
+                    home=await self._endpoints.home_region(vin.upper()),
                     type=self._type, country=self._country, vin=vin.upper(),
                 ),
                 headers=headers, data=data,
@@ -110,7 +110,7 @@ class AudiVehicleActions:
             headers = {"Authorization": "Bearer " + self._bearer_token["access_token"]}
             await self._api.request(
                 "POST",
-                self._client._get_cariad_url_for_vin(vin, "climatisation/stop"),
+                self._endpoints.cariad_url_for_vin(vin, "climatisation/stop"),
                 headers=headers, data=None,
             )
         else:
@@ -119,7 +119,7 @@ class AudiVehicleActions:
             await self._api.request(
                 "POST",
                 "{home}/fs-car/bs/climatisation/v1/{type}/{country}/vehicles/{vin}/climater/actions".format(
-                    home=await self._client._get_home_region(vin.upper()),
+                    home=await self._endpoints.home_region(vin.upper()),
                     type=self._type, country=self._country, vin=vin.upper(),
                 ),
                 headers=headers, data=data,
@@ -136,7 +136,7 @@ class AudiVehicleActions:
         }
         await self._api.request(
             "POST",
-            self._client._get_cariad_url_for_vin(vin, "auxiliaryheating/start"),
+            self._endpoints.cariad_url_for_vin(vin, "auxiliaryheating/start"),
             headers=headers, data=data,
         )
 
@@ -150,7 +150,7 @@ class AudiVehicleActions:
         }
         await self._api.request(
             "POST",
-            self._client._get_cariad_url_for_vin(vin, "auxiliaryheating/stop"),
+            self._endpoints.cariad_url_for_vin(vin, "auxiliaryheating/stop"),
             headers=headers, data=None,
         )
 
@@ -167,7 +167,7 @@ class AudiVehicleActions:
         body = await self._api.request(
             "GET",
             "{home}/api/rolesrights/authorization/v2/vehicles/{vin}/services/{action}/security-pin-auth-requested".format(
-                home=await self._client._get_home_region_setter(vin.upper()),
+                home=await self._endpoints.home_region_setter(vin.upper()),
                 vin=vin.upper(), action=action,
             ),
             headers=headers, data=None,
@@ -189,7 +189,7 @@ class AudiVehicleActions:
         body = await self._api.request(
             "POST",
             "{home}/api/rolesrights/authorization/v2/security-pin-auth-completed".format(
-                home=await self._client._get_home_region_setter(vin.upper())
+                home=await self._endpoints.home_region_setter(vin.upper())
             ),
             headers=headers, data=json.dumps(data),
         )

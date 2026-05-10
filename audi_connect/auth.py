@@ -6,6 +6,7 @@ from typing import Optional
 from .api import AudiAPI
 from .client import AudiVehicleClient
 from .actions import AudiVehicleActions
+from .endpoints import AudiEndpoints
 from .oauth import AudiOAuth
 from .token_store import TokenStore
 from .exceptions import AuthenticationError, TokenRefreshError
@@ -23,6 +24,7 @@ class AudiAuth:
         self._spin = spin
         self._api_level = api_level if api_level is not None else 0
         self._token_store = token_store or TokenStore()
+        self._endpoints = AudiEndpoints(api, country=self._country, api_level=self._api_level)
         self._oauth = AudiOAuth(api, country)
 
         # OAuth state
@@ -73,8 +75,10 @@ class AudiAuth:
 
     def _build_delegates(self) -> None:
         """Create client and actions instances after successful auth."""
+        self._endpoints.set_vw_token(self.vw_token)
         self._client = AudiVehicleClient(
             api=self._api,
+            endpoints=self._endpoints,
             bearer_token=self._bearer_token_json,
             vw_token=self.vw_token,
             audi_token=self.audi_token,
@@ -85,7 +89,7 @@ class AudiAuth:
         )
         self._actions = AudiVehicleActions(
             api=self._api,
-            client=self._client,
+            endpoints=self._endpoints,
             bearer_token=self._bearer_token_json,
             vw_token=self.vw_token,
             xclient_id=self.xclient_id,
