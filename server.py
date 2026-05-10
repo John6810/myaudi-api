@@ -163,7 +163,9 @@ if _raw_watch_interval > 0 and _raw_watch_interval < MIN_WATCH_INTERVAL:
 # ---------------------------------------------------------------------------
 audi_auth_refresh_total = Counter(
     "audi_auth_refresh_total",
-    "Audi Connect login or token-refresh attempts.",
+    "Audi Connect login or token-refresh attempts. result is one "
+    "of: success | failure (full login), refresh_success | "
+    "refresh_failure (incremental token refresh).",
     ["result"],
 )
 audi_cache_operation_total = Counter(
@@ -206,12 +208,37 @@ class AudiClient:
         return (time.time() - self._auth_time) > TOKEN_REFRESH_INTERVAL
 
     async def ensure_auth(self) -> bool:
-        """Login if needed (expired or missing). Thread-safe via lock."""
+        """Login if needed (expired or missing). Thread-safe via lock.
+
+        Tries an incremental token refresh first (3 upstream calls vs ~10
+        for a full login); falls back to login() if refresh fails or no
+        auth context exists yet.
+        """
         if not self._needs_refresh():
             return True
         async with self._auth_lock:
             if not self._needs_refresh():
                 return True
+            # Try a token refresh first (3 upstream calls vs ~10 for
+            # full login). Fall back to login() if refresh fails or
+            # if we don't have an auth context yet.
+            if self._auth is not None and self.authenticated:
+                elapsed = int(time.time() - self._auth_time)
+                try:
+                    if await self._auth.refresh_tokens(elapsed):
+                        self._auth_time = time.time()
+                        log.info("Tokens refreshed (no full re-login)")
+                        audi_auth_refresh_total.labels(result="refresh_success").inc()
+                        return True
+                    # refresh_tokens returned False — tokens still valid
+                    # enough that no refresh was needed. Just bump the
+                    # timestamp to skip retrying for another interval.
+                    self._auth_time = time.time()
+                    return True
+                except Exception as e:
+                    log.warning("Token refresh failed (%s) — falling back to full login", e)
+                    audi_auth_refresh_total.labels(result="refresh_failure").inc()
+                    # Fall through to full login.
             return await self.login()
 
     async def login(self) -> bool:

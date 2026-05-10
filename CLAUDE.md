@@ -72,7 +72,7 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
   - All endpoints except `/health`, `/ready`, `/metrics` require `X-API-Key` header (matches `AUDI_API_KEY` env var via `Depends(require_api_key)`); fails closed with 503 if the key is unset on the server
   - Rate limiting via slowapi: 30 req/min (read), 5 req/min (actions) — HTTP 429 on exceed
   - 4h data cache (auto-invalidated after actions); concurrent `?confirm=true` calls serialized through `_update_lock`
-  - Auto token refresh every 45min
+  - Auto token refresh every 45min — incremental refresh (3 upstream calls) is tried first, with fallback to full login (~10 calls) only if refresh fails or no auth context exists yet
   - `?confirm=true` on action endpoints to wait and verify
   - `GET /brief` for quick status
   - `GET /ready` returns 503 until authenticated to Audi Connect; `GET /health` always 200 if process alive
