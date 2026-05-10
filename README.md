@@ -46,6 +46,12 @@ Run the interactive setup to create your `.env` file:
 python main.py setup
 ```
 
+Or copy the template:
+
+```bash
+cp .env.example .env
+```
+
 Or create `.env` manually:
 
 ```env
