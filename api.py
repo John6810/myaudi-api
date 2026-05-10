@@ -516,11 +516,14 @@ async def stop_heater(request: Request, vin: str, confirm: bool = Query(False)):
 
 
 async def _confirm_action(vehicle: AudiVehicle, check_field: Optional[str], expected_value: Optional[str]) -> dict:
-    """Wait a few seconds, re-fetch vehicle data, and check if the action was applied."""
+    """Wait a few seconds, re-fetch vehicle data via the cache-coordinated path,
+    and check if the action was applied. Goes through client.update_vehicles()
+    so concurrent confirms are serialized by _update_lock and don't fan out
+    parallel selectivestatus calls against the ~6 req/h Audi budget."""
     client.invalidate_cache()
     await asyncio.sleep(5)
     try:
-        await vehicle.update()
+        await client.update_vehicles(force=True)
         dashboard = vehicle.get_dashboard()
         confirmed = True
         if check_field and expected_value:

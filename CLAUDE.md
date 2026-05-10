@@ -46,7 +46,7 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
   - `update()`: parallel fetch via `asyncio.gather()` (status + position + trips)
   - `is_moving`: distinguishes "vehicle moving" from "position fetch failed"
 - **`models.py`** - API response parsing with enums:
-  - `VehicleDataResponse` (old/new API field mapping), `TripDataResponse`, `VehiclesResponse`
+  - `VehicleDataResponse` (old/new API field mapping), `TripDataResponse`
   - `LockState`, `DoorState`, `WindowState` enums (replace magic strings)
   - Safe parsing with `.get()` chains
 - **`utils.py`** - Helpers: `get_attr` (deep dict access), `parse_int/float/datetime`, `to_byte_array`

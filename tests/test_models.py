@@ -3,7 +3,7 @@
 import pytest
 from datetime import datetime, timezone
 
-from audi_connect.models import VehicleDataResponse, Field, TripDataResponse, VehiclesResponse, VehicleInfo, LockState, DoorState, WindowState
+from audi_connect.models import VehicleDataResponse, Field, TripDataResponse, LockState, DoorState, WindowState
 
 
 class TestField:
@@ -182,36 +182,6 @@ class TestTripDataResponse:
         assert trip.mileage is None
 
 
-class TestVehiclesResponse:
-    def test_parse_vehicles(self):
-        data = {
-            "userVehicles": [
-                {
-                    "vin": "WAUTEST123",
-                    "csid": "cs1",
-                    "nickname": "My Audi",
-                    "vehicle": {
-                        "media": {"shortName": "A4", "longName": "Audi A4 Avant"},
-                        "core": {"modelYear": "2024"},
-                    },
-                }
-            ]
-        }
-        vr = VehiclesResponse()
-        vr.parse(data)
-        assert len(vr.vehicles) == 1
-        v = vr.vehicles[0]
-        assert v.vin == "WAUTEST123"
-        assert v.title == "My Audi"
-        assert v.model == "Audi A4 Avant"
-        assert v.model_year == "2024"
-
-    def test_empty_response(self):
-        vr = VehiclesResponse()
-        vr.parse({})
-        assert len(vr.vehicles) == 0
-
-
 class TestEnums:
     def test_lock_state_values(self):
         assert LockState.UNKNOWN.value == "0"
@@ -252,12 +222,37 @@ class TestEnums:
         assert lock_fields[0].value == LockState.LOCKED.value
 
 
-class TestVehicleInfo:
-    def test_str(self):
-        vi = VehicleInfo()
-        vi.title = "My Audi"
-        vi.model = "A4"
-        vi.model_year = "2024"
-        vi.vin = "WAUTEST"
-        assert "My Audi" in str(vi)
-        assert "WAUTEST" in str(vi)
+class TestVehicleDataResponseIndexes:
+    def test_get_field_returns_indexed_entry(self):
+        data = {
+            "fuelStatus": {"rangeStatus": {"value": {
+                "totalRange_km": 500,
+                "carCapturedTimestamp": "2024-01-01T00:00:00+0000",
+            }}}
+        }
+        vdr = VehicleDataResponse(data)
+        field = vdr.get_field("TOTAL_RANGE")
+        assert field is not None
+        assert field.value == 500
+
+    def test_get_field_returns_none_for_missing(self):
+        vdr = VehicleDataResponse({})
+        assert vdr.get_field("TOTAL_RANGE") is None
+
+    def test_get_state_returns_indexed_entry(self):
+        data = {
+            "charging": {
+                "batteryStatus": {"value": {
+                    "currentSOC_pct": 80,
+                    "carCapturedTimestamp": "2024-01-01T00:00:00+0000",
+                }},
+            }
+        }
+        vdr = VehicleDataResponse(data)
+        state = vdr.get_state("stateOfCharge")
+        assert state is not None
+        assert state["value"] == 80
+
+    def test_get_state_returns_none_for_missing(self):
+        vdr = VehicleDataResponse({})
+        assert vdr.get_state("stateOfCharge") is None

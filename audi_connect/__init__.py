@@ -5,7 +5,7 @@ from .client import AudiVehicleClient
 from .actions import AudiVehicleActions
 from .connection import create_session, connect_and_get_vehicles
 from .vehicle import AudiVehicle
-from .models import VehicleDataResponse, VehiclesResponse, TripDataResponse, LockState, DoorState, WindowState
+from .models import VehicleDataResponse, TripDataResponse, LockState, DoorState, WindowState
 from .exceptions import (
     AudiConnectError,
     AuthenticationError,

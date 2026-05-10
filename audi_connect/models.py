@@ -53,6 +53,8 @@ class VehicleDataResponse:
     def __init__(self, data: dict):
         self.data_fields: list["Field"] = []
         self.states: list[dict] = []
+        self._fields_by_name: dict[str, "Field"] = {}
+        self._states_by_name: dict[str, dict] = {}
 
         # Range and fuel
         self._try_append_field(data, "TOTAL_RANGE", ["fuelStatus", "rangeStatus", "value", "totalRange_km"])
@@ -102,6 +104,17 @@ class VehicleDataResponse:
         self._try_append_state(data, "climatisationState", -1, ["climatisation", "auxiliaryHeatingStatus", "value", "climatisationState"])
         self._try_append_state(data, "climatisationState", -1, ["climatisation", "climatisationStatus", "value", "climatisationState"])
         self._try_append_state(data, "remainingClimatisationTime", -1, ["climatisation", "climatisationStatus", "value", "remainingClimatisationTime_min"])
+
+        # Build O(1) indexes from the lists. The lists remain authoritative
+        # (some callers iterate them) — the dicts are a read-side cache.
+        self._fields_by_name = {f.name: f for f in self.data_fields if f.name}
+        self._states_by_name = {s["name"]: s for s in self.states}
+
+    def get_field(self, name: str) -> Optional["Field"]:
+        return self._fields_by_name.get(name)
+
+    def get_state(self, name: str) -> Optional[dict]:
+        return self._states_by_name.get(name)
 
     def _get_from_json(self, json_data: dict, loc: list[str]) -> Any:
         child = json_data
@@ -202,41 +215,3 @@ class TripDataResponse:
         self.timestamp: Any = data.get("timestamp")
         self.overall_mileage: Optional[int] = int(data["overallMileage"]) if "overallMileage" in data else None
         self.zero_emission_distance: Optional[int] = int(data["zeroEmissionDistance"]) if "zeroEmissionDistance" in data else None
-
-
-class VehiclesResponse:
-    def __init__(self):
-        self.vehicles: list["VehicleInfo"] = []
-
-    def parse(self, data: dict) -> None:
-        user_vehicles = data.get("userVehicles")
-        if user_vehicles is None:
-            return
-        for item in user_vehicles:
-            vehicle = VehicleInfo()
-            vehicle.parse(item)
-            self.vehicles.append(vehicle)
-
-
-class VehicleInfo:
-    def __init__(self):
-        self.vin: str = ""
-        self.csid: str = ""
-        self.model: str = ""
-        self.model_year: str = ""
-        self.title: str = ""
-
-    def parse(self, data: dict) -> None:
-        self.vin = data.get("vin")
-        self.csid = data.get("csid")
-        if data.get("vehicle") and data["vehicle"].get("media"):
-            self.model = data["vehicle"]["media"].get("longName", "")
-        if data.get("vehicle") and data["vehicle"].get("core"):
-            self.model_year = data["vehicle"]["core"].get("modelYear", "")
-        if data.get("nickname") and len(data["nickname"]) > 0:
-            self.title = data["nickname"]
-        elif data.get("vehicle") and data["vehicle"].get("media"):
-            self.title = data["vehicle"]["media"].get("shortName", "")
-
-    def __str__(self):
-        return f"{self.title} ({self.model} {self.model_year}) - VIN: {self.vin}"

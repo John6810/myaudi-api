@@ -119,36 +119,6 @@ class AudiVehicleClient:
         except Exception:
             return None
 
-    async def get_charger(self, vin: str) -> dict:
-        """Fetch charger status (legacy MBB API)."""
-        self._api.use_token(self._vw_token)
-        return await self._api.get(
-            "{home}/fs-car/bs/batterycharge/v1/{type}/{country}/vehicles/{vin}/charger".format(
-                home=await self._get_home_region(vin.upper()),
-                type=self._type, country=self._country, vin=vin.upper(),
-            )
-        )
-
-    async def get_climater(self, vin: str) -> dict:
-        """Fetch climate status (legacy MBB API)."""
-        self._api.use_token(self._vw_token)
-        return await self._api.get(
-            "{home}/fs-car/bs/climatisation/v1/{type}/{country}/vehicles/{vin}/climater".format(
-                home=await self._get_home_region(vin.upper()),
-                type=self._type, country=self._country, vin=vin.upper(),
-            )
-        )
-
-    async def get_preheater(self, vin: str) -> dict:
-        """Fetch preheater status (legacy MBB API)."""
-        self._api.use_token(self._vw_token)
-        return await self._api.get(
-            "{home}/fs-car/bs/rs/v1/{type}/{country}/vehicles/{vin}/status".format(
-                home=await self._get_home_region(vin.upper()),
-                type=self._type, country=self._country, vin=vin.upper(),
-            )
-        )
-
     async def get_tripdata(self, vin: str, kind: str) -> dict:
         """Fetch trip statistics (short-term or long-term)."""
         self._api.use_token(self._vw_token)
