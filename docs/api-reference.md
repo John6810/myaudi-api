@@ -64,6 +64,34 @@ curl -H "X-API-Key: $AUDI_API_KEY" http://localhost:8000/vehicles
 - Query: `?vin=<VIN>` (optional).
 - Returns: `{"vehicles": [{"vin", "title", "is_moving", "latitude"?, "longitude"?, "google_maps"?}]}`. Coordinates and the maps link are present only when a parking position is known.
 
+### `GET /last-parked`
+
+Returns the last known parking position for a vehicle, with a Google Maps deep link. Reads from the 4h-cached state — no live Audi API call within the cache window.
+
+- Auth: `X-API-Key`.
+- Rate limit: 30/min.
+- Query: `?vin=<VIN>` (optional). If omitted, the first vehicle in the cached list is used.
+- Returns 200:
+
+```json
+{
+  "vin": "WAUXXXX",
+  "parked_at": "2026-04-12T16:45:00+02:00",
+  "latitude": 49.684353,
+  "longitude": 5.436657,
+  "google_maps": "https://www.google.com/maps?q=49.684353,5.436657"
+}
+```
+
+- Returns 404 when the vehicle has no parking position cached (moving, fetch failed, or first startup before the watcher completed a cycle).
+
+```bash
+curl -H "X-API-Key: $AUDI_API_KEY" http://localhost:8000/last-parked
+curl -H "X-API-Key: $AUDI_API_KEY" "http://localhost:8000/last-parked?vin=WAUXXXX"
+```
+
+> Reverse geocoding (an `address` field via Nominatim) is planned for a future PR behind an `AUDI_REVERSE_GEOCODING=true` flag. See issue #8 "Nice to have".
+
 ### `POST /{vin}/lock`
 
 - Auth: `X-API-Key` + `AUDI_SPIN` env var must be set on the server.
