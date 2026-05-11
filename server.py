@@ -10,6 +10,7 @@ Endpoints:
   GET  /vehicles            List vehicles
   GET  /status              Full vehicle status
   GET  /position            Vehicle GPS position
+  GET  /last-parked         Last known parking position
   POST /{vin}/lock          Lock vehicle (requires S-PIN)
   POST /{vin}/unlock        Unlock vehicle (requires S-PIN)
   POST /{vin}/climate/start Start climate control
@@ -553,6 +554,48 @@ async def get_position(request: Request, vin: Optional[str] = Query(None, descri
         results.append(data)
 
     return {"vehicles": results}
+
+
+# --- Last parked ---
+@app.get("/last-parked", dependencies=[Depends(require_api_key)])
+@limiter.limit("30/minute")
+async def get_last_parked(
+    request: Request,
+    vin: Optional[str] = Query(None, description="Filter by VIN. If omitted, the first vehicle is used."),
+):
+    """Last known parking position for a vehicle, with Google Maps link.
+
+    Reads from the 4h-cached vehicle state — no live Audi API call
+    in the cache window. Returns 404 if no parking position is
+    currently available (vehicle moving, fetch failed, or first
+    startup before watcher cycle completed).
+    """
+    await _require_auth()
+    await client.update_vehicles()
+
+    if vin:
+        vehicle = _get_vehicle_or_404(vin)
+    else:
+        if not client.vehicles:
+            raise HTTPException(status_code=404, detail="No vehicles available")
+        vehicle = client.vehicles[0]
+
+    pos = vehicle.position
+    if not pos or not pos.get("latitude") or not pos.get("longitude"):
+        raise HTTPException(
+            status_code=404,
+            detail=f"No parking position available for VIN {vehicle.vin} (vehicle may be moving or fetch failed)",
+        )
+
+    lat = pos["latitude"]
+    lon = pos["longitude"]
+    return {
+        "vin": vehicle.vin,
+        "parked_at": pos.get("timestamp"),
+        "latitude": lat,
+        "longitude": lon,
+        "google_maps": f"https://www.google.com/maps?q={lat},{lon}",
+    }
 
 
 # --- Lock / Unlock ---
