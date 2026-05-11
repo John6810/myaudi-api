@@ -115,6 +115,11 @@ if _raw_watch_interval > 0 and _raw_watch_interval < MIN_WATCH_INTERVAL:
 else:
     WATCH_INTERVAL = _raw_watch_interval
 
+# Goodnight check: local hour at which to verify the vehicle is locked and plugged.
+# 0 = disabled. 1-23 = local hour (TZ-aware). Webhook fires only when at least
+# one alert is raised; no notification on "all good".
+GOODNIGHT_HOUR = int(os.getenv("AUDI_GOODNIGHT_HOUR", "0"))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] [rid=%(request_id)s] %(name)s: %(message)s",
@@ -319,6 +324,43 @@ client = AudiClient()
 
 _watcher_task: Optional[asyncio.Task] = None
 
+# Date (local TZ) on which the last goodnight check fired. Used to ensure
+# a single fire per day across multiple watcher cycles. None = never fired.
+_last_goodnight_date = None
+
+
+async def _goodnight_check(vehicles, on_alert) -> None:
+    """Inspect each vehicle and call on_alert(vehicle, alerts, checks) when at
+    least one alert is raised.
+
+    Alerts:
+      - "unlocked"  if vehicle.doors_trunk_status != "Locked"
+      - "unplugged" if vehicle.plug_state is not None and != "connected"
+
+    For ICE vehicles (plug_state is None), the plug check is skipped silently
+    and only the lock check applies.
+    """
+    for vehicle in vehicles:
+        alerts = []
+        checks = {}
+
+        # Lock check — always applicable
+        locked = vehicle.doors_trunk_status == "Locked"
+        checks["locked"] = locked
+        if not locked:
+            alerts.append("unlocked")
+
+        # Plug check — only when the vehicle reports a plug state at all
+        plug_state = vehicle.plug_state
+        if plug_state is not None:
+            plugged = plug_state == "connected"
+            checks["plugged"] = plugged
+            if not plugged:
+                alerts.append("unplugged")
+
+        if alerts:
+            await on_alert(vehicle, alerts, checks)
+
 
 async def _send_webhook(payload: dict) -> None:
     """POST a JSON payload to the configured webhook URL.
@@ -361,6 +403,17 @@ async def _background_watcher() -> None:
             "timestamp": datetime.now(TZ).isoformat(),
         })
 
+    async def _on_goodnight_alert(vehicle, alerts, checks):
+        log.warning("Goodnight alert for %s: %s", vehicle.vin, alerts)
+        await _send_webhook({
+            "event": "goodnight_check",
+            "vin": vehicle.vin,
+            "title": vehicle.title,
+            "alerts": alerts,
+            "checks": checks,
+            "timestamp": datetime.now(TZ).isoformat(),
+        })
+
     while True:
         await asyncio.sleep(WATCH_INTERVAL)
         try:
@@ -368,6 +421,19 @@ async def _background_watcher() -> None:
                 continue
             await client.update_vehicles(force=True)
             await check_vehicles(client.vehicles, prev_states, on_change=_on_change)
+
+            # Goodnight check — fire once per day at the configured local hour.
+            # The WATCH_INTERVAL (>=15min) is fine-grained enough that the
+            # target hour window is always caught.
+            if GOODNIGHT_HOUR > 0:
+                global _last_goodnight_date
+                now = datetime.now(TZ)
+                if now.hour == GOODNIGHT_HOUR and _last_goodnight_date != now.date():
+                    _last_goodnight_date = now.date()
+                    try:
+                        await _goodnight_check(client.vehicles, _on_goodnight_alert)
+                    except Exception as e:
+                        log.error("Goodnight check failed: %s", e)
         except Exception as e:
             log.error("Watcher error: %s", e)
 

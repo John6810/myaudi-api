@@ -231,3 +231,24 @@ X-Audi-Signature: sha256=<hex>
 ```
 
 Where the hex is `HMAC-SHA256(secret, raw_request_body)`. The receiver MUST verify against the **raw** body (n8n: enable "raw body" on the webhook node before validating). The `state` dict above is the same shape as `AudiVehicle.get_brief()`.
+
+### goodnight_check event
+
+Sent by the background watcher at `AUDI_GOODNIGHT_HOUR` (local time, using the `TZ` env var) when a vehicle is unlocked or has its charging cable disconnected. Fires once per day at the configured hour. **Not sent when everything is fine** — alert-only, no "all good" notification.
+
+Requires `AUDI_WATCH_INTERVAL > 0` (the goodnight check piggybacks on the watcher loop) and `AUDI_GOODNIGHT_HOUR ∈ [1, 23]`.
+
+For ICE vehicles (no `plug_state` reported by Audi), only the lock check applies; the `plugged` key is absent from `checks` and `"unplugged"` cannot appear in `alerts`.
+
+```json
+{
+  "event": "goodnight_check",
+  "vin": "WAUXXXXXXXXXXXXX",
+  "title": "My Audi",
+  "alerts": ["unlocked", "unplugged"],
+  "checks": {"locked": false, "plugged": false},
+  "timestamp": "2026-05-10T22:00:14.123456+02:00"
+}
+```
+
+Same HMAC signing rules as `state_change` when `AUDI_WEBHOOK_SECRET` is set.
