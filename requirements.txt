@@ -1,7 +1,7 @@
 aiohttp>=3.13.5
 beautifulsoup4>=4.14.3
 python-dotenv>=1.2.2
-certifi>=2026.4.22
+certifi>=2026.5.20
 tenacity>=9.1.4
 fastapi>=0.136.1,<1
 uvicorn>=0.46.0,<1
