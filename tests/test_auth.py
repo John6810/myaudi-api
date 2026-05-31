@@ -199,14 +199,14 @@ class TestAudiOAuthHelpers:
     def test_get_cariad_url_eu(self):
         api = MagicMock()
         oauth = AudiOAuth(api, country="DE")
-        url = oauth._get_cariad_url("/login/v1/idk/openid-configuration")
+        url = oauth._get_cariad_url("/auth/v1/idk/oidc/openid-configuration")
         assert "emea.bff.cariad.digital" in url
         assert "openid-configuration" in url
 
     def test_get_cariad_url_us(self):
         api = MagicMock()
         oauth = AudiOAuth(api, country="US")
-        url = oauth._get_cariad_url("/login/v1/idk/openid-configuration")
+        url = oauth._get_cariad_url("/auth/v1/idk/oidc/openid-configuration")
         assert "na.bff.cariad.digital" in url
 
     def test_get_post_url_absolute(self):

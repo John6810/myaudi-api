@@ -15,7 +15,7 @@ This command walks through the flow step by step so you can pinpoint where it's 
 2. **Dynamic config** — `GET .../service/mobileapp/configurations/market/{country}/{lang}`
    Pulls `idkClientIDAndroidLive`, `myAudiAuthorizationServerProxyServiceURLProduction`, `mbbOAuthBaseURLLive`. Falls back to hardcoded defaults if missing.
 
-3. **OpenID discovery** — `GET .../login/v1/idk/openid-configuration`
+3. **OpenID discovery** — `GET .../auth/v1/idk/oidc/openid-configuration`
    Pulls `authorization_endpoint` and `token_endpoint`.
 
 4. **PKCE challenge** — pure crypto, can't fail unless Python is broken.
@@ -53,7 +53,7 @@ Read `audi_connect/oauth.py` and confirm each of the above is still in the code 
 
 1. **What error message?** Map the message to a step:
    - `CountryNotSupportedError` → step 1
-   - HTTP 401 on `/login/v1/idk/token` → step 9 (X-QMAuth secret may have rotated)
+   - HTTP 401 on `/auth/v1/idk/oidc/token` → step 9 (X-QMAuth secret may have rotated)
    - HTTP 4xx in step 6/7 → HTML form changed, BeautifulSoup selector failed
    - `KeyError: 'hmac'` or fallthrough to hidden inputs unexpectedly → step 7 regex broken
    - Empty `data` in GraphQL response → AZS token (step 10) or vehicle list call

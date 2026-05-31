@@ -119,7 +119,7 @@ class AudiOAuth:
             f"https://content.app.my.audi.com/service/mobileapp/configurations/"
             f"market/{self._country}/{language}?v=4.23.1"
         )
-        openidcfg_url = self._get_cariad_url("/login/v1/idk/openid-configuration")
+        openidcfg_url = self._get_cariad_url("/auth/v1/idk/oidc/openid-configuration")
         marketcfg_json = await self._api.request("GET", marketcfg_url, None)
 
         client_id = "09b6cbec-cd19-4589-82fd-363dfa8c24da@apps_vw-dilab_com"
@@ -144,7 +144,7 @@ class AudiOAuth:
         if "authorization_endpoint" in openidcfg_json:
             authorization_endpoint = openidcfg_json["authorization_endpoint"]
 
-        token_endpoint = self._get_cariad_url("/login/v1/idk/token")
+        token_endpoint = self._get_cariad_url("/auth/v1/idk/oidc/token")
         if "token_endpoint" in openidcfg_json:
             token_endpoint = openidcfg_json["token_endpoint"]
 
