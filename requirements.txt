@@ -1,5 +1,5 @@
 aiohttp>=3.13.5
-beautifulsoup4>=4.14.3
+beautifulsoup4>=4.15.0
 python-dotenv>=1.2.2
 certifi>=2026.4.22
 tenacity>=9.1.4
