@@ -112,6 +112,9 @@ class AudiVehicle:
     def _get_state(self, name: str) -> Optional[dict]:
         return self._vehicle_data.get_state(name) if self._vehicle_data else None
 
+    def _get_legacy_access_field(self, name: str) -> Optional[object]:
+        return self._vehicle_data.get_legacy_access_field(name) if self._vehicle_data else None
+
     # --- Vehicle info ---
 
     @property
@@ -165,12 +168,101 @@ class AudiVehicle:
 
     # --- Doors and locks ---
 
-    def _is_door_unlocked(self, field_name: str) -> bool:
+    def _lock_state(self, field_name: str) -> Optional[bool]:
+        """Return True/False only for an explicit locked/unlocked value."""
         field = self._get_field(field_name)
+        if field is None:
+            return None
+        if field.value == LockState.LOCKED.value:
+            return True
+        if field.value == LockState.UNLOCKED.value:
+            return False
+        return None
+
+    def _open_state(self, field_name: str) -> Optional[bool]:
+        """Return True/False only for an explicit open/closed value."""
+        field = self._get_field(field_name)
+        if field is None:
+            return None
+        if field.value == DoorState.OPEN.value:
+            return True
+        if field.value == DoorState.CLOSED.value:
+            return False
+        return None
+
+    def _window_open_state(self, field_name: str) -> Optional[bool]:
+        """Return True/False only for an explicit open/closed window value."""
+        field = self._get_field(field_name)
+        if field is None:
+            return None
+        if field.value == WindowState.OPEN.value:
+            return True
+        if field.value == WindowState.CLOSED.value:
+            return False
+        return None
+
+    @property
+    def front_left_door_locked(self) -> Optional[bool]:
+        return self._lock_state("LOCK_STATE_LEFT_FRONT_DOOR")
+
+    @property
+    def front_right_door_locked(self) -> Optional[bool]:
+        return self._lock_state("LOCK_STATE_RIGHT_FRONT_DOOR")
+
+    @property
+    def rear_left_door_locked(self) -> Optional[bool]:
+        return self._lock_state("LOCK_STATE_LEFT_REAR_DOOR")
+
+    @property
+    def rear_right_door_locked(self) -> Optional[bool]:
+        return self._lock_state("LOCK_STATE_RIGHT_REAR_DOOR")
+
+    @property
+    def front_left_door_open(self) -> Optional[bool]:
+        return self._open_state("OPEN_STATE_LEFT_FRONT_DOOR")
+
+    @property
+    def front_right_door_open(self) -> Optional[bool]:
+        return self._open_state("OPEN_STATE_RIGHT_FRONT_DOOR")
+
+    @property
+    def rear_left_door_open(self) -> Optional[bool]:
+        return self._open_state("OPEN_STATE_LEFT_REAR_DOOR")
+
+    @property
+    def rear_right_door_open(self) -> Optional[bool]:
+        return self._open_state("OPEN_STATE_RIGHT_REAR_DOOR")
+
+    @property
+    def liftgate_locked(self) -> Optional[bool]:
+        return self._lock_state("LOCK_STATE_TRUNK_LID")
+
+    @property
+    def liftgate_open(self) -> Optional[bool]:
+        return self._open_state("OPEN_STATE_TRUNK_LID")
+
+    @property
+    def front_left_window_open(self) -> Optional[bool]:
+        return self._window_open_state("STATE_LEFT_FRONT_WINDOW")
+
+    @property
+    def front_right_window_open(self) -> Optional[bool]:
+        return self._window_open_state("STATE_RIGHT_FRONT_WINDOW")
+
+    @property
+    def rear_left_window_open(self) -> Optional[bool]:
+        return self._window_open_state("STATE_LEFT_REAR_WINDOW")
+
+    @property
+    def rear_right_window_open(self) -> Optional[bool]:
+        return self._window_open_state("STATE_RIGHT_REAR_WINDOW")
+
+    def _is_door_unlocked(self, field_name: str) -> bool:
+        field = self._get_legacy_access_field(field_name)
         return field is not None and field.value != LockState.LOCKED.value
 
     def _is_door_open(self, field_name: str) -> bool:
-        field = self._get_field(field_name)
+        field = self._get_legacy_access_field(field_name)
         return field is not None and field.value != DoorState.CLOSED.value
 
     @property
@@ -202,6 +294,65 @@ class AudiVehicle:
         return self._is_door_open("OPEN_STATE_HOOD")
 
     @property
+    def hood_open_state(self) -> Optional[bool]:
+        return self._open_state("OPEN_STATE_HOOD")
+
+    @property
+    def lock_status(self) -> str:
+        """Aggregate four door locks and the liftgate without inference."""
+        states = [
+            self.front_left_door_locked,
+            self.front_right_door_locked,
+            self.rear_left_door_locked,
+            self.rear_right_door_locked,
+            self.liftgate_locked,
+        ]
+        known = {state for state in states if state is not None}
+        if len(known) > 1:
+            return "mixed"
+        if any(state is None for state in states):
+            return "unknown"
+        return "locked" if known == {True} else "unlocked"
+
+    @property
+    def closure_status(self) -> str:
+        """Aggregate four door closures and the liftgate without inference."""
+        states = [
+            self.front_left_door_open,
+            self.front_right_door_open,
+            self.rear_left_door_open,
+            self.rear_right_door_open,
+            self.liftgate_open,
+        ]
+        if any(state is True for state in states):
+            return "open"
+        if all(state is False for state in states):
+            return "closed"
+        return "unknown"
+
+    @property
+    def access_state(self) -> dict[str, object]:
+        """Return structured, tri-state vehicle access information."""
+        return {
+            "lock_status": self.lock_status,
+            "closure_status": self.closure_status,
+            "doors": {
+                "front_left": {"locked": self.front_left_door_locked, "open": self.front_left_door_open},
+                "front_right": {"locked": self.front_right_door_locked, "open": self.front_right_door_open},
+                "rear_left": {"locked": self.rear_left_door_locked, "open": self.rear_left_door_open},
+                "rear_right": {"locked": self.rear_right_door_locked, "open": self.rear_right_door_open},
+            },
+            "liftgate": {"locked": self.liftgate_locked, "open": self.liftgate_open},
+            "hood": {"open": self.hood_open_state},
+            "windows": {
+                "front_left": {"open": self.front_left_window_open},
+                "front_right": {"open": self.front_right_window_open},
+                "rear_left": {"open": self.rear_left_window_open},
+                "rear_right": {"open": self.rear_right_window_open},
+            },
+        }
+
+    @property
     def doors_trunk_status(self) -> str:
         if self.any_door_open or self.trunk_open:
             return "Open"
@@ -212,7 +363,7 @@ class AudiVehicle:
     # --- Windows ---
 
     def _is_window_open(self, field_name: str) -> bool:
-        field = self._get_field(field_name)
+        field = self._get_legacy_access_field(field_name)
         return field is not None and field.value != WindowState.CLOSED.value
 
     @property
@@ -385,9 +536,9 @@ class AudiVehicle:
 
         return data
 
-    def get_dashboard(self) -> dict[str, str]:
+    def get_dashboard(self) -> dict[str, object]:
         """Return a dict of human-readable vehicle status fields."""
-        data: dict[str, str] = {}
+        data: dict[str, object] = {}
         data["vehicle"] = f"{self.title} - {self.model} ({self.model_year})"
         data["vin"] = self.vin
 
@@ -410,6 +561,7 @@ class AudiVehicle:
 
         data["doors_trunk"] = self.doors_trunk_status
         data["windows"] = "Open" if self.any_window_open else "Closed"
+        data["access"] = self.access_state
         if self.hood_open:
             data["hood"] = "Open"
 

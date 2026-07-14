@@ -49,6 +49,36 @@ curl -H "X-API-Key: $AUDI_API_KEY" http://localhost:8000/vehicles
 - Rate limit: 30/min.
 - Query: `?vin=<VIN>` (optional, filters to one vehicle).
 - Returns: `{"count": int, "vehicles": [{"vin", "model", "title", **dashboard}]}` — the dashboard dict is `AudiVehicle.get_dashboard()`.
+- `access` is the structured vehicle access state. Boolean `locked` and `open` values are `null` when Audi reports an unknown value or omits the field:
+
+```json
+{
+  "access": {
+    "lock_status": "locked",
+    "closure_status": "open",
+    "doors": {
+      "front_left": {"locked": true, "open": false},
+      "front_right": {"locked": true, "open": false},
+      "rear_left": {"locked": true, "open": false},
+      "rear_right": {"locked": true, "open": false}
+    },
+    "liftgate": {"locked": true, "open": true},
+    "hood": {"open": false},
+    "windows": {
+      "front_left": {"open": false},
+      "front_right": {"open": false},
+      "rear_left": {"open": null},
+      "rear_right": {"open": null}
+    }
+  }
+}
+```
+
+`lock_status` is `locked`, `unlocked`, `mixed`, or `unknown`. A uniform status requires explicit states for all four passenger doors and the liftgate; differing known lock states produce `mixed`. `closure_status` is `open` when any passenger door or liftgate is explicitly open, `closed` only when all five are explicitly closed, and otherwise `unknown`. Hood and window states are reported independently and do not affect either aggregate.
+
+`doors_trunk` is a **legacy combined value** retained for compatibility. It can be `Open`, `Closed`, or `Locked` and must not be treated as a pure lock state; use `access` for new integrations.
+
+The Home Assistant sensor, server goodnight check, and action-confirmation logic continue to use legacy compatibility fields in this release. Migrating those consumers to structured access state is intentionally deferred to a separate change so this API addition does not alter their behavior.
 
 ### `GET /brief`
 
@@ -56,6 +86,7 @@ curl -H "X-API-Key: $AUDI_API_KEY" http://localhost:8000/vehicles
 - Rate limit: 30/min.
 - Query: `?vin=<VIN>` (optional).
 - Returns: `{"vehicles": [brief]}` — `brief` is `AudiVehicle.get_brief()` (locked, position, range, battery/fuel).
+- `brief["locked"]` is a **legacy combined value** retained for compatibility. Despite its name, it can be `Open`, `Closed`, or `Locked`; use `/status` and its structured `access` object when lock and closure state must be distinguished.
 
 ### `GET /position`
 

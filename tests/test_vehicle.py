@@ -41,6 +41,34 @@ def _make_vehicle(auth=None, **info_overrides):
     return AudiVehicle(auth, vehicle_info)
 
 
+def _set_access_data(vehicle, doors, windows=None):
+    """Attach a CARIAD-shaped access response to a vehicle."""
+    vehicle._vehicle_data = VehicleDataResponse({
+        "access": {
+            "accessStatus": {
+                "value": {
+                    "carCapturedTimestamp": "2024-01-01T00:00:00+0000",
+                    "doors": [
+                        {"name": name, "status": status}
+                        for name, status in doors.items()
+                    ],
+                    "windows": [
+                        {"name": name, "status": status}
+                        for name, status in (windows or {}).items()
+                    ],
+                }
+            }
+        }
+    })
+
+
+def _all_access_points(lock="locked", closure="closed"):
+    return {
+        name: [lock, closure]
+        for name in ("frontLeft", "frontRight", "rearLeft", "rearRight", "trunk")
+    }
+
+
 class TestVehicleInit:
     def test_basic_init(self):
         v = _make_vehicle()
@@ -231,6 +259,195 @@ class TestNullSafetyDashboard:
         dashboard = v.get_dashboard()
         # Should not have inspection_due because km is missing
         assert "inspection_due" not in dashboard
+
+
+class TestStructuredAccessState:
+    def test_locked_vehicle_with_open_liftgate(self):
+        v = _make_vehicle()
+        doors = _all_access_points()
+        doors["trunk"] = ["locked", "open"]
+        _set_access_data(v, doors)
+
+        access = v.get_dashboard()["access"]
+        assert access["lock_status"] == "locked"
+        assert access["closure_status"] == "open"
+        assert access["liftgate"] == {"locked": True, "open": True}
+        # Legacy combined fields intentionally retain their historical values.
+        assert v.get_dashboard()["doors_trunk"] == "Open"
+        assert v.get_brief()["locked"] == "Open"
+
+    def test_unlocked_vehicle_with_all_closures_closed(self):
+        v = _make_vehicle()
+        _set_access_data(v, _all_access_points(lock="unlocked"))
+
+        access = v.access_state
+        assert access["lock_status"] == "unlocked"
+        assert access["closure_status"] == "closed"
+        assert all(door["locked"] is False for door in access["doors"].values())
+        assert access["liftgate"]["locked"] is False
+        assert v.doors_trunk_status == "Closed"
+
+    def test_mixed_lock_states(self):
+        v = _make_vehicle()
+        doors = _all_access_points()
+        doors["rearRight"] = ["unlocked", "closed"]
+        _set_access_data(v, doors)
+
+        assert v.lock_status == "mixed"
+        assert v.front_left_door_locked is True
+        assert v.rear_right_door_locked is False
+
+    def test_one_door_open_while_locked(self):
+        v = _make_vehicle()
+        doors = _all_access_points()
+        doors["frontLeft"] = ["locked", "open"]
+        _set_access_data(v, doors)
+
+        assert v.lock_status == "locked"
+        assert v.closure_status == "open"
+        assert v.front_left_door_open is True
+        assert v.front_right_door_open is False
+
+    def test_hood_open_is_independent(self):
+        v = _make_vehicle()
+        doors = _all_access_points()
+        doors["bonnet"] = ["open"]
+        _set_access_data(v, doors)
+
+        access = v.access_state
+        assert access["closure_status"] == "closed"
+        assert access["hood"] == {"open": True}
+        assert v.hood_open_state is True
+        assert v.hood_open is True
+        assert v.get_dashboard()["hood"] == "Open"
+
+    def test_hood_open_retains_boolean_compatibility_for_unknown(self):
+        v = _make_vehicle()
+        doors = _all_access_points()
+        doors["bonnet"] = ["unknown"]
+        _set_access_data(v, doors)
+
+        assert v.hood_open_state is None
+        assert v.hood_open is True
+
+        missing = _make_vehicle()
+        missing._vehicle_data = VehicleDataResponse({})
+        assert missing.hood_open_state is None
+        assert missing.hood_open is False
+
+    def test_unknown_lock_field_makes_uniform_aggregate_unknown(self):
+        v = _make_vehicle()
+        doors = _all_access_points()
+        doors["frontLeft"] = ["unknown", "closed"]
+        _set_access_data(v, doors)
+
+        assert v.front_left_door_locked is None
+        assert v.lock_status == "unknown"
+        assert v.closure_status == "closed"
+        assert v.any_door_unlocked is True
+        assert v.get_dashboard()["doors_trunk"] == "Closed"
+        assert v.get_brief()["locked"] == "Closed"
+
+    def test_unknown_closure_field_is_not_inferred_open_or_closed(self):
+        v = _make_vehicle()
+        doors = _all_access_points()
+        doors["frontLeft"] = ["locked", "unknown"]
+        _set_access_data(v, doors)
+
+        assert v.front_left_door_open is None
+        assert v.closure_status == "unknown"
+        assert v.any_door_open is True
+        assert v.get_dashboard()["doors_trunk"] == "Open"
+
+    def test_all_access_fields_missing(self):
+        v = _make_vehicle()
+        v._vehicle_data = VehicleDataResponse({})
+
+        access = v.get_dashboard()["access"]
+        assert access["lock_status"] == "unknown"
+        assert access["closure_status"] == "unknown"
+        assert access["liftgate"] == {"locked": None, "open": None}
+        assert access["hood"] == {"open": None}
+        assert all(
+            value is None
+            for door in access["doors"].values()
+            for value in door.values()
+        )
+        assert all(
+            window["open"] is None for window in access["windows"].values()
+        )
+        # These unsafe defaults are preserved only for backward compatibility.
+        assert v.get_dashboard()["doors_trunk"] == "Locked"
+        assert v.get_dashboard()["windows"] == "Closed"
+        assert v.get_brief()["locked"] == "Locked"
+
+    def test_each_ordinary_window_has_explicit_tristate_property(self):
+        v = _make_vehicle()
+        _set_access_data(
+            v,
+            _all_access_points(),
+            windows={
+                "frontLeft": ["open"],
+                "frontRight": ["closed"],
+                "rearLeft": ["unknown"],
+                # rearRight deliberately missing
+            },
+        )
+
+        assert v.front_left_window_open is True
+        assert v.front_right_window_open is False
+        assert v.rear_left_window_open is None
+        assert v.rear_right_window_open is None
+        assert v.any_window_open is True
+        assert v.access_state["windows"] == {
+            "front_left": {"open": True},
+            "front_right": {"open": False},
+            "rear_left": {"open": None},
+            "rear_right": {"open": None},
+        }
+
+    def test_unknown_windows_preserve_legacy_open_behavior(self):
+        v = _make_vehicle()
+        _set_access_data(
+            v,
+            _all_access_points(),
+            windows={"frontLeft": ["unknown"], "frontRight": []},
+        )
+
+        assert v.front_left_window_open is None
+        assert v.front_right_window_open is None
+        assert v.any_window_open is True
+        assert v.get_dashboard()["windows"] == "Open"
+
+    def test_later_closed_window_state_does_not_change_legacy_first_status_behavior(self):
+        v = _make_vehicle()
+        _set_access_data(
+            v,
+            _all_access_points(),
+            windows={"frontLeft": ["unknown", "closed"]},
+        )
+
+        assert v.front_left_window_open is False
+        assert v.any_window_open is True
+        assert v.get_dashboard()["windows"] == "Open"
+
+    def test_contradictory_door_states_do_not_change_legacy_combined_behavior(self):
+        v = _make_vehicle()
+        doors = _all_access_points()
+        doors["frontLeft"] = ["locked", "unlocked", "closed"]
+        _set_access_data(v, doors)
+
+        assert v.front_left_door_locked is None
+        assert v.lock_status == "unknown"
+        assert v.any_door_unlocked is False
+        assert v.doors_trunk_status == "Locked"
+
+        doors["frontLeft"] = ["locked", "open", "closed"]
+        _set_access_data(v, doors)
+        assert v.front_left_door_open is None
+        assert v.closure_status == "unknown"
+        assert v.any_door_open is False
+        assert v.doors_trunk_status == "Locked"
 
 
 class TestBrief:
