@@ -49,32 +49,45 @@ curl -H "X-API-Key: $AUDI_API_KEY" http://localhost:8000/vehicles
 - Rate limit: 30/min.
 - Query: `?vin=<VIN>` (optional, filters to one vehicle).
 - Returns: `{"count": int, "vehicles": [{"vin", "model", "title", **dashboard}]}` — the dashboard dict is `AudiVehicle.get_dashboard()`.
-- `access` is the structured vehicle access state. Boolean `locked` and `open` values are `null` when Audi reports an unknown value or omits the field:
+- `access` is the structured vehicle access state. Diagnostic Boolean values are `null` when Audi reports an unknown, unsupported, missing, or contradictory value:
 
 ```json
 {
   "access": {
-    "lock_status": "locked",
-    "closure_status": "open",
+    "state": "unlocked",
+    "open_access_points": [],
     "doors": {
-      "front_left": {"locked": true, "open": false},
-      "front_right": {"locked": true, "open": false},
-      "rear_left": {"locked": true, "open": false},
-      "rear_right": {"locked": true, "open": false}
+      "front_left": {"locked": false, "open": false},
+      "front_right": {"locked": false, "open": false},
+      "rear_left": {"locked": false, "open": false},
+      "rear_right": {"locked": false, "open": false}
     },
-    "liftgate": {"locked": true, "open": true},
+    "liftgate": {"locked": false, "open": false},
     "hood": {"open": false},
     "windows": {
-      "front_left": {"open": false},
-      "front_right": {"open": false},
-      "rear_left": {"open": null},
-      "rear_right": {"open": null}
-    }
+      "front_left": false,
+      "front_right": false,
+      "rear_left": null,
+      "rear_right": null
+    },
+    "open_windows": [],
+    "sunroof_open": null,
+    "roof_cover_open": null,
+    "secure": false
   }
 }
 ```
 
-`lock_status` is `locked`, `unlocked`, `mixed`, or `unknown`. A uniform status requires explicit states for all four passenger doors and the liftgate; differing known lock states produce `mixed`. `closure_status` is `open` when any passenger door or liftgate is explicitly open, `closed` only when all five are explicitly closed, and otherwise `unknown`. Hood and window states are reported independently and do not affect either aggregate.
+`state` is the primary doors/liftgate condition:
+
+- `locked`: all four doors and the liftgate are explicitly closed and every required lock state is explicitly locked.
+- `unlocked`: all five lockable closures are explicitly closed and trustworthy lock data establishes that the vehicle is not fully locked. A lock command should be able to succeed.
+- `open`: one or more lockable closures are explicitly open. `open_access_points` identifies them using stable names.
+- `unknown`: required lock or closure data is unavailable, unsupported, contradictory, or incomplete.
+
+Windows and sunroof do not affect `state` or whether the vehicle can accept a lock command. `open_windows` lists explicitly open ordinary windows. `sunroof_open` is independent, and `roof_cover_open` keeps the shade/cover separate from the sunroof.
+
+`secure` is `true` only when `state` is `locked`, all four ordinary windows are explicitly closed, and the sunroof is explicitly closed. It is `false` when a required condition is explicitly unsatisfied and `null` when a required condition is unknown. Contradictory telemetry—such as locked fields combined with an open closure—remains visible in the detailed fields, produces `state: "open"`, and should be treated as stale or inconsistent data rather than a normal physical state.
 
 `doors_trunk` is a **legacy combined value** retained for compatibility. It can be `Open`, `Closed`, or `Locked` and must not be treated as a pure lock state; use `access` for new integrations.
 

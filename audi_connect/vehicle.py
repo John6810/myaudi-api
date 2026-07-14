@@ -257,6 +257,14 @@ class AudiVehicle:
     def rear_right_window_open(self) -> Optional[bool]:
         return self._window_open_state("STATE_RIGHT_REAR_WINDOW")
 
+    @property
+    def sunroof_open(self) -> Optional[bool]:
+        return self._window_open_state("STATE_SUN_ROOF_MOTOR_COVER")
+
+    @property
+    def roof_cover_open(self) -> Optional[bool]:
+        return self._window_open_state("STATE_ROOF_COVER_WINDOW")
+
     def _is_door_unlocked(self, field_name: str) -> bool:
         field = self._get_legacy_access_field(field_name)
         return field is not None and field.value != LockState.LOCKED.value
@@ -331,11 +339,85 @@ class AudiVehicle:
         return "unknown"
 
     @property
+    def open_access_points(self) -> list[str]:
+        """Return explicitly open doors and liftgate in stable order."""
+        closures = {
+            "front_left_door": self.front_left_door_open,
+            "front_right_door": self.front_right_door_open,
+            "rear_left_door": self.rear_left_door_open,
+            "rear_right_door": self.rear_right_door_open,
+            "liftgate": self.liftgate_open,
+        }
+        return [name for name, is_open in closures.items() if is_open is True]
+
+    @property
+    def open_windows(self) -> list[str]:
+        """Return explicitly open ordinary windows in stable order."""
+        windows = {
+            "front_left_window": self.front_left_window_open,
+            "front_right_window": self.front_right_window_open,
+            "rear_left_window": self.rear_left_window_open,
+            "rear_right_window": self.rear_right_window_open,
+        }
+        return [name for name, is_open in windows.items() if is_open is True]
+
+    def _access_status(self) -> str:
+        """Return the primary doors/liftgate state from explicit telemetry."""
+        closures = [
+            self.front_left_door_open,
+            self.front_right_door_open,
+            self.rear_left_door_open,
+            self.rear_right_door_open,
+            self.liftgate_open,
+        ]
+        if any(state is True for state in closures):
+            return "open"
+        if not all(state is False for state in closures):
+            return "unknown"
+
+        locks = [
+            self.front_left_door_locked,
+            self.front_right_door_locked,
+            self.rear_left_door_locked,
+            self.rear_right_door_locked,
+            self.liftgate_locked,
+        ]
+        if not all(state is not None for state in locks):
+            return "unknown"
+        if all(state is True for state in locks):
+            return "locked"
+        return "unlocked"
+
+    @property
+    def secure(self) -> Optional[bool]:
+        """Return whether access closures, glazing, and sunroof are secure."""
+        access_status = self._access_status()
+        locked = (
+            True if access_status == "locked"
+            else False if access_status in ("unlocked", "open")
+            else None
+        )
+        required = [
+            locked,
+            None if self.front_left_window_open is None else not self.front_left_window_open,
+            None if self.front_right_window_open is None else not self.front_right_window_open,
+            None if self.rear_left_window_open is None else not self.rear_left_window_open,
+            None if self.rear_right_window_open is None else not self.rear_right_window_open,
+            None if self.sunroof_open is None else not self.sunroof_open,
+        ]
+        if any(state is False for state in required):
+            return False
+        if all(state is True for state in required):
+            return True
+        return None
+
+    @property
     def access_state(self) -> dict[str, object]:
         """Return structured, tri-state vehicle access information."""
         return {
-            "lock_status": self.lock_status,
-            "closure_status": self.closure_status,
+            "state": self._access_status(),
+            "open_access_points": self.open_access_points,
+            "secure": self.secure,
             "doors": {
                 "front_left": {"locked": self.front_left_door_locked, "open": self.front_left_door_open},
                 "front_right": {"locked": self.front_right_door_locked, "open": self.front_right_door_open},
@@ -345,11 +427,14 @@ class AudiVehicle:
             "liftgate": {"locked": self.liftgate_locked, "open": self.liftgate_open},
             "hood": {"open": self.hood_open_state},
             "windows": {
-                "front_left": {"open": self.front_left_window_open},
-                "front_right": {"open": self.front_right_window_open},
-                "rear_left": {"open": self.rear_left_window_open},
-                "rear_right": {"open": self.rear_right_window_open},
+                "front_left": self.front_left_window_open,
+                "front_right": self.front_right_window_open,
+                "rear_left": self.rear_left_window_open,
+                "rear_right": self.rear_right_window_open,
             },
+            "open_windows": self.open_windows,
+            "sunroof_open": self.sunroof_open,
+            "roof_cover_open": self.roof_cover_open,
         }
 
     @property
