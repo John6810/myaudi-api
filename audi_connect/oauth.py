@@ -1,12 +1,13 @@
 """OAuth2/OIDC login flow for Audi Connect — 13-step authentication."""
 
+import asyncio
 import json
 import uuid
 import base64
 import os
 import re
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from hashlib import sha256
 from urllib.parse import urlparse, parse_qs, urlencode
 from typing import Optional
@@ -19,6 +20,22 @@ from .endpoints import cariad_url
 from .exceptions import AuthenticationError, CountryNotSupportedError
 
 _LOGGER = logging.getLogger(__name__)
+
+# OAuth 2.0 Device Authorization Grant (RFC 8628).
+# Since July 2026 Audi enforces Play Integrity attestation on the password
+# (authorization-code) token exchange in Europe, so the legacy login can no
+# longer complete there. The device-code flow does not hit that exchange and is
+# therefore the working path for EU accounts. US/CA/CN keep the password flow.
+DEVICE_CODE_SCOPE = "openid mbb profile badge cars dealers vin"  # "mbb" needed for legacy lock/unlock/trips/climate
+DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+DEVICE_AUTH_ENDPOINT_FALLBACK = "https://identity.vwgroup.io/oidc/v1/device_authorization"
+# Regions where attestation is NOT enforced and the legacy password flow still works.
+PASSWORD_FLOW_REGIONS = frozenset({"US", "CA", "CN"})
+
+
+def uses_device_code(country: Optional[str]) -> bool:
+    """True if the region must authenticate via the device-code flow (Europe)."""
+    return (country or "DE").upper() not in PASSWORD_FLOW_REGIONS
 
 
 class AudiOAuth:
@@ -89,10 +106,11 @@ class AudiOAuth:
 
     # --- Main login flow ---
 
-    async def login(self, user: str, password: str) -> dict:
-        """Execute the full 13-step OAuth2 login flow.
+    async def _fetch_login_config(self) -> dict:
+        """Steps 1-3: market config, dynamic config, OpenID discovery.
 
-        Returns a dict with all tokens and OAuth state needed by the client.
+        Shared by both the password and device-code login paths. Returns the
+        endpoints and client id needed to complete either flow.
         """
         self._api.use_token(None)
         self._api.set_xclient_id(None)
@@ -147,6 +165,36 @@ class AudiOAuth:
         token_endpoint = self._get_cariad_url("/auth/v1/idk/oidc/token")
         if "token_endpoint" in openidcfg_json:
             token_endpoint = openidcfg_json["token_endpoint"]
+
+        device_authorization_endpoint = DEVICE_AUTH_ENDPOINT_FALLBACK
+        if "device_authorization_endpoint" in openidcfg_json:
+            device_authorization_endpoint = openidcfg_json["device_authorization_endpoint"]
+
+        return {
+            "language": language,
+            "client_id": client_id,
+            "authorization_endpoint": authorization_endpoint,
+            "token_endpoint": token_endpoint,
+            "device_authorization_endpoint": device_authorization_endpoint,
+            "authorization_server_base_url": authorization_server_base_url,
+            "mbb_oauth_base_url": mbb_oauth_base_url,
+        }
+
+    async def login(self, user: str, password: str) -> dict:
+        """Password (authorization-code) login flow — non-device-code regions only.
+
+        EU regions must use login_device_code() instead: Audi enforces Play
+        Integrity attestation on the code-exchange step (step 9) there, which
+        returns "invalid assertion headers". Returns a dict with all tokens and
+        OAuth state needed by the client.
+        """
+        config = await self._fetch_login_config()
+        language = config["language"]
+        client_id = config["client_id"]
+        authorization_endpoint = config["authorization_endpoint"]
+        token_endpoint = config["token_endpoint"]
+        authorization_server_base_url = config["authorization_server_base_url"]
+        mbb_oauth_base_url = config["mbb_oauth_base_url"]
 
         # Step 4: Generate PKCE challenge
         _LOGGER.debug("Step 4: Generating PKCE code challenge...")
@@ -265,6 +313,151 @@ class AudiOAuth:
             headers=headers, allow_redirects=False, rsp_wtxt=True,
         )
         bearer_token_json = json.loads(bearer_token_rsptxt)
+        if "access_token" not in bearer_token_json:
+            _LOGGER.error("Token exchange failed, response: %s", bearer_token_rsptxt)
+            raise AuthenticationError(
+                f"IDK token exchange did not return an access_token: {bearer_token_rsptxt[:500]}"
+            )
+
+        return await self._finalize_session(bearer_token_json, config)
+
+    async def login_device_code(self, on_verification=None) -> dict:
+        """Device Authorization Grant (RFC 8628) login — EU regions.
+
+        Requires a one-time manual approval: the user opens the returned
+        verification URL, signs in and approves. The resulting refresh token is
+        then persisted so subsequent sessions refresh non-interactively.
+
+        `on_verification`, if given, is called with a dict holding
+        `verification_uri`, `verification_uri_complete`, `user_code` and
+        `expires_in`, so the caller can render the approval prompt. When omitted,
+        the prompt is logged at WARNING level. Returns the same token dict shape
+        as login().
+        """
+        config = await self._fetch_login_config()
+        client_id = config["client_id"]
+        device_authorization_endpoint = config["device_authorization_endpoint"]
+        token_endpoint = config["token_endpoint"]
+
+        # Step D1: Request a device + user code (no attestation required here).
+        _LOGGER.debug("Step D1: Requesting device authorization...")
+        headers = {
+            "Accept": "application/json",
+            "Accept-Charset": "utf-8",
+            "X-App-Version": AudiAPI.HDR_XAPP_VERSION,
+            "X-App-Name": "myAudi",
+            "User-Agent": AudiAPI.HDR_USER_AGENT,
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        device_req_data = urlencode(
+            {"client_id": client_id, "scope": DEVICE_CODE_SCOPE}, encoding="utf-8",
+        ).replace("+", "%20")
+        _, device_rsptxt = await self._api.request(
+            "POST", device_authorization_endpoint, device_req_data,
+            headers=headers, allow_redirects=False, rsp_wtxt=True,
+        )
+        device_init = json.loads(device_rsptxt)
+        if "device_code" not in device_init:
+            _LOGGER.error("Device authorization failed, response: %s", device_rsptxt)
+            raise AuthenticationError(
+                f"Device authorization did not return a device_code: {device_rsptxt[:500]}"
+            )
+
+        verification = {
+            "verification_uri": device_init.get("verification_uri", ""),
+            "verification_uri_complete": device_init.get("verification_uri_complete", ""),
+            "user_code": device_init.get("user_code", ""),
+            "expires_in": device_init.get("expires_in", 0),
+        }
+        self._notify_verification(verification, on_verification)
+
+        # Step D2: Poll the token endpoint until the user approves.
+        _LOGGER.debug("Step D2: Polling for device authorization...")
+        bearer_token_json = await self._poll_device_token(
+            token_endpoint, device_init["device_code"], client_id, device_init
+        )
+
+        return await self._finalize_session(bearer_token_json, config)
+
+    @staticmethod
+    def _notify_verification(verification: dict, on_verification) -> None:
+        """Surface the device-approval prompt to the operator."""
+        if on_verification is not None:
+            on_verification(verification)
+            return
+        target = (
+            verification.get("verification_uri_complete")
+            or verification.get("verification_uri")
+        )
+        _LOGGER.warning(
+            "Device approval required: open %s and sign in to approve (user code: %s).",
+            target, verification.get("user_code"),
+        )
+
+    async def _poll_device_token(
+        self, token_endpoint: str, device_code: str, client_id: str, device_init: dict
+    ) -> dict:
+        """Poll the token endpoint for the device-code grant until approved.
+
+        Follows RFC 8628: sleep the server-provided interval, retry on
+        `authorization_pending`, back off on `slow_down`, until an access token
+        arrives or the request expires.
+        """
+        interval = max(int(device_init.get("interval", 5)), 1)
+        expires_in = min(int(device_init.get("expires_in", 600)), 600)
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        headers = {
+            "Accept": "application/json",
+            "Accept-Charset": "utf-8",
+            "User-Agent": AudiAPI.HDR_USER_AGENT,
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        poll_data = urlencode(
+            {
+                "grant_type": DEVICE_CODE_GRANT_TYPE,
+                "device_code": device_code,
+                "client_id": client_id,
+            },
+            encoding="utf-8",
+        ).replace("+", "%20")
+
+        while datetime.now(timezone.utc) < deadline:
+            await asyncio.sleep(interval)
+            _, poll_rsptxt = await self._api.request(
+                "POST", token_endpoint, poll_data,
+                headers=headers, allow_redirects=False, rsp_wtxt=True,
+            )
+            poll = json.loads(poll_rsptxt)
+            if "access_token" in poll:
+                _LOGGER.debug("Device authorization approved.")
+                return poll
+            error = poll.get("error")
+            _LOGGER.debug("Device poll status: %s", error or poll)
+            if error == "authorization_pending":
+                continue
+            if error == "slow_down":
+                interval += 5
+                continue
+            raise AuthenticationError(
+                f"Device authorization failed: "
+                f"{poll.get('error_description') or error or poll}"
+            )
+
+        raise AuthenticationError(
+            "Device authorization timed out before the user approved the request."
+        )
+
+    async def _finalize_session(self, bearer_token_json: dict, config: dict) -> dict:
+        """Steps 10-13: derive AZS (Audi) + MBB (VW) tokens from the IDK bearer.
+
+        Shared tail of both login paths — identical once an IDK bearer token has
+        been obtained, whether via password or device code.
+        """
+        client_id = config["client_id"]
+        token_endpoint = config["token_endpoint"]
+        authorization_server_base_url = config["authorization_server_base_url"]
+        mbb_oauth_base_url = config["mbb_oauth_base_url"]
+        language = config["language"]
 
         # Step 10: Get AZS (Audi) token
         _LOGGER.debug("Step 10: Getting Audi AZS token...")

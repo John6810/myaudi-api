@@ -259,7 +259,21 @@ class AudiClient:
 
             api = AudiAPI(self._session)
             self._auth = AudiAuth(api, country=AUDI_COUNTRY, spin=AUDI_SPIN, api_level=AUDI_API_LEVEL)
-            vehicle_list = await self._auth.login(AUDI_USERNAME, AUDI_PASSWORD)
+
+            def _on_verification(info: dict) -> None:
+                # EU device-code flow needs a one-time manual approval. Headless
+                # server: surface the URL + code in logs so an operator can act.
+                # After approval the refresh token is persisted and reused.
+                url = info.get("verification_uri_complete") or info.get("verification_uri")
+                log.warning(
+                    "myAudi device approval REQUIRED — open %s and sign in "
+                    "(user code: %s). Waiting up to %ss for approval.",
+                    url, info.get("user_code"), info.get("expires_in"),
+                )
+
+            vehicle_list = await self._auth.login(
+                AUDI_USERNAME, AUDI_PASSWORD, on_verification=_on_verification
+            )
             self.vehicles = [AudiVehicle(self._auth, v) for v in vehicle_list]
 
             self.authenticated = True
@@ -323,6 +337,7 @@ client = AudiClient()
 
 
 _watcher_task: Optional[asyncio.Task] = None
+_login_task: Optional[asyncio.Task] = None
 
 # Date (local TZ) on which the last goodnight check fired. Used to ensure
 # a single fire per day across multiple watcher cycles. None = never fired.
@@ -440,15 +455,27 @@ async def _background_watcher() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Login on startup, start watcher if configured, close on shutdown."""
-    global _watcher_task
+    """Log in on startup, start watcher if configured, close on shutdown.
+
+    The initial login runs as a background task rather than blocking startup:
+    for EU accounts the device-code flow can wait minutes for a one-time manual
+    approval (the URL is logged at WARNING), and blocking here would freeze the
+    ASGI app — `/health`/`/ready` must stay responsive so K8s probes don't kill
+    the pod mid-approval. `/ready` reports 503 until `client.authenticated` flips.
+    """
+    global _watcher_task, _login_task
     if not AUDI_USERNAME or not AUDI_PASSWORD:
         log.error("AUDI_USERNAME and AUDI_PASSWORD env vars are required")
     else:
-        await client.login()
+        # Go through ensure_auth (lock-protected, refresh-aware) rather than
+        # login() directly, so the initial login can't race the watcher's own
+        # ensure_auth into two concurrent device-code flows.
+        _login_task = asyncio.create_task(client.ensure_auth())
     if WATCH_INTERVAL > 0:
         _watcher_task = asyncio.create_task(_background_watcher())
     yield
+    if _login_task:
+        _login_task.cancel()
     if _watcher_task:
         _watcher_task.cancel()
     await client.close()

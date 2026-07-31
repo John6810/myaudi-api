@@ -7,7 +7,7 @@ from .api import AudiAPI
 from .client import AudiVehicleClient
 from .actions import AudiVehicleActions
 from .endpoints import AudiEndpoints
-from .oauth import AudiOAuth
+from .oauth import AudiOAuth, uses_device_code
 from .oauth_state import OAuthState
 from .token_store import TokenStore
 from .exceptions import AuthenticationError, TokenRefreshError
@@ -150,8 +150,14 @@ class AudiAuth:
 
     # --- Login ---
 
-    async def login(self, user: str, password: str) -> list[dict]:
-        """Full authentication flow (13 steps). Uses cached tokens if available.
+    async def login(self, user: str, password: str, on_verification=None) -> list[dict]:
+        """Full authentication flow. Uses cached tokens if available.
+
+        For European regions this uses the device-code flow (Audi enforces Play
+        Integrity attestation on the password flow there since July 2026), which
+        requires a one-time manual approval; `on_verification` is called with the
+        approval prompt details (see AudiOAuth.login_device_code). US/CA/CN keep
+        the username/password flow.
 
         Returns the validated vehicle list (so callers can avoid an extra
         get_vehicle_list() round-trip; the list is fetched as part of token
@@ -167,7 +173,10 @@ class AudiAuth:
                 self._actions = None
 
         _LOGGER.info("Starting login to Audi Connect...")
-        tokens = await self._oauth.login(user, password)
+        if uses_device_code(self._country):
+            tokens = await self._oauth.login_device_code(on_verification=on_verification)
+        else:
+            tokens = await self._oauth.login(user, password)
         self._set_state(OAuthState.from_dict(tokens))
         self._build_delegates()
         self._save_tokens()

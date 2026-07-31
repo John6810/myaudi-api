@@ -25,13 +25,18 @@ async def connect_and_get_vehicles(
     country: str = "DE",
     spin: Optional[str] = None,
     api_level: int = 1,
+    on_verification=None,
 ) -> tuple[AudiAuth, list[AudiVehicle]]:
-    """Authenticate to Audi Connect and return (auth, vehicles)."""
+    """Authenticate to Audi Connect and return (auth, vehicles).
+
+    `on_verification` is forwarded to the device-code flow (EU regions) to render
+    the one-time approval prompt; ignored for the password flow.
+    """
     api = AudiAPI(session)
     auth = AudiAuth(api, country=country, spin=spin, api_level=api_level)
 
     print("Connecting to Audi Connect...")
-    vehicle_list = await auth.login(username, password)
+    vehicle_list = await auth.login(username, password, on_verification=on_verification)
     print("Connected!\n")
 
     print(f"{len(vehicle_list)} vehicle(s) found\n")
