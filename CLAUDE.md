@@ -66,7 +66,7 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
 - **`logging_utils.py`** - `redact()` helper + `RedactingFilter` (logging filter, installed at startup in `server.py` and `main.py`)
   - Masks bearer tokens, JSON OAuth values (`access_token`, `refresh_token`, `id_token`, `securityToken`, `securityPinHash`, `password`, `spin`, `client_secret`, `code_verifier`), `X-QMAuth` HMAC values, and emails (`xxx***@domain`)
   - Belt-and-suspenders: `aiohttp.*` loggers pinned to WARNING regardless of root level
-- **`token_store.py`** - OAuth token persistence in `~/.audi_connect_tokens.json` (1h TTL, 0o600 permissions on Linux/Mac)
+- **`token_store.py`** - OAuth token persistence in `~/.audi_connect_tokens.json` (30-day max age — the file carries the refresh tokens, and dropping it early would force a manual device-code re-approval on EU; 0o600 permissions on Linux/Mac). Stale access tokens are refreshed on restore in `AudiAuth.login` via `refresh_tokens(cache_age)`, which self-gates on fresh caches; only a dead refresh token falls back to a full (interactive on EU) login.
 
 ### Entry points
 - **`server.py`** (root, formerly `api.py`) - FastAPI REST API server:
@@ -196,7 +196,7 @@ POST /{vin}/heater/stop   Stop heater
 - **Device-code = one-time manual approval**: the first EU login prints/logs a `identity.vwgroup.io/oidc/device/audi?user_code=…` URL; the user opens it, signs in and approves (within `expires_in`, ~300s). After that the refresh token is persisted (`~/.audi_connect_tokens.json`) and every later session refreshes non-interactively. CLI shows the prompt (`_print_device_verification` in `main.py`); server logs it at WARNING (`server.py`). For K8s: approve once at first boot, or generate the token locally and inject the token file into the pod.
 - The OAuth flow lives in `oauth.py`, the coordinator in `auth.py` (separated for testability)
 - Two API levels coexist: legacy (MBB/VW) and new (CARIAD) — the code supports both
-- Tokens are cached in `~/.audi_connect_tokens.json` (1h TTL, restricted permissions on Unix)
+- Tokens are cached in `~/.audi_connect_tokens.json` (30-day max age, restricted permissions on Unix). On restore, stale access tokens are refreshed via the persisted refresh tokens; a manual device-code re-approval (EU) is only needed if the refresh token itself is dead (or the file is >30 days old).
 - Vehicle data fetches run in parallel via `asyncio.gather()` for better performance
 - Cache is auto-invalidated after actions (lock, climate, etc.) so next status reflects changes
 - Action endpoints support `?confirm=true` to wait 5s and verify the action was applied

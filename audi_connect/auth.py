@@ -1,6 +1,7 @@
 """Authentication coordinator for Audi Connect — manages tokens and delegates to client/actions."""
 
 import logging
+import time
 from typing import Optional
 
 from .api import AudiAPI
@@ -29,6 +30,7 @@ class AudiAuth:
         self._oauth = AudiOAuth(api, country)
 
         self._state: Optional[OAuthState] = None
+        self._restored_age_sec: int = 0  # age of cache-restored tokens (0 = fresh login)
 
         # Delegates (created after login)
         self._client: Optional[AudiVehicleClient] = None
@@ -128,7 +130,12 @@ class AudiAuth:
     # --- Token persistence ---
 
     def _try_restore_tokens(self) -> bool:
-        """Try to restore tokens from cache. Returns True if successful."""
+        """Try to restore tokens from cache. Returns True if successful.
+
+        Records the cache age in ``_restored_age_sec`` so login() can refresh
+        stale access tokens instead of falling back to a full (interactive on
+        EU) login.
+        """
         cached = self._token_store.load()
         if cached is None:
             return False
@@ -136,7 +143,8 @@ class AudiAuth:
         try:
             self._set_state(OAuthState.from_dict(cached))
             self._build_delegates()
-            _LOGGER.info("Restored tokens from cache")
+            self._restored_age_sec = int(time.time() - cached.get("saved_at", 0))
+            _LOGGER.info("Restored tokens from cache (age: %ds)", self._restored_age_sec)
             return True
         except (KeyError, TypeError) as e:
             _LOGGER.debug("Failed to restore cached tokens: %s", e)
@@ -165,6 +173,13 @@ class AudiAuth:
         """
         if self._try_restore_tokens():
             try:
+                # Stale access tokens (cache older than ~55min) are refreshed via
+                # the persisted refresh tokens rather than falling through to a
+                # full login — which on EU would demand a manual device-code
+                # re-approval. refresh_tokens() self-gates: fresh caches skip the
+                # upstream calls entirely. Only a dead refresh token (raises
+                # TokenRefreshError) drops us to the full login below.
+                await self.refresh_tokens(self._restored_age_sec)
                 return await self.client.get_vehicle_list()
             except Exception as e:
                 _LOGGER.info("Cached tokens expired or invalid: %s. Re-authenticating...", e)
