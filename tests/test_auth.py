@@ -136,6 +136,37 @@ class TestLogin:
         assert auth._state.bearer_token["access_token"] == "new_bearer"
 
     @pytest.mark.asyncio
+    async def test_login_dead_azs_token_forces_refresh_not_full_login(self):
+        """Prod scenario: cache fresh per the MBB gate (<55min) but the AZS
+        token (~10min TTL) is dead — validation fails, a FORCED refresh must
+        rescue the session instead of demanding a device-code re-approval."""
+        api = MagicMock()
+        api.set_xclient_id = MagicMock()
+        api.use_token = MagicMock()
+        cached = _make_tokens()
+        cached["saved_at"] = time.time() - 700  # ~12min: passes MBB gate, AZS dead
+        store = _make_token_store(cached=cached)
+
+        auth = AudiAuth(api, country="DE", token_store=store)
+        auth._oauth = AsyncMock()
+        auth._oauth.refresh_tokens = AsyncMock(return_value={
+            "bearer_token": {"access_token": "new_bearer", "refresh_token": "br_ref2"},
+            "audi_token": {"access_token": "new_audi"},
+            "vw_token": {"access_token": "new_vw"},
+            "mbb_oauth_token": {"refresh_token": "mbb_ref", "expires_in": 3600},
+        })
+
+        # First validation fails (dead AZS token), post-refresh retry succeeds.
+        calls = AsyncMock(side_effect=[Exception("token expired"), [{"vin": "X"}]])
+        with patch.object(AudiVehicleClient, "get_vehicle_list", calls):
+            result = await auth.login("user@test.com", "password123")
+
+        assert result == [{"vin": "X"}]
+        auth._oauth.refresh_tokens.assert_awaited_once()  # the forced refresh
+        auth._oauth.login_device_code.assert_not_awaited()  # NO re-approval
+        store.clear.assert_not_called()  # refresh tokens preserved on disk
+
+    @pytest.mark.asyncio
     async def test_login_dead_refresh_token_falls_back_to_device_code(self):
         """Only a dead refresh token justifies a new interactive login."""
         api = MagicMock()

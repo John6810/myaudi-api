@@ -173,19 +173,29 @@ class AudiAuth:
         """
         if self._try_restore_tokens():
             try:
-                # Stale access tokens (cache older than ~55min) are refreshed via
-                # the persisted refresh tokens rather than falling through to a
-                # full login — which on EU would demand a manual device-code
-                # re-approval. refresh_tokens() self-gates: fresh caches skip the
-                # upstream calls entirely. Only a dead refresh token (raises
-                # TokenRefreshError) drops us to the full login below.
+                # Stale access tokens are refreshed via the persisted refresh
+                # tokens rather than falling through to a full login — which on
+                # EU would demand a manual device-code re-approval.
+                # refresh_tokens() self-gates on the MBB expiry: fresh caches
+                # skip the upstream calls entirely.
                 await self.refresh_tokens(self._restored_age_sec)
                 return await self.client.get_vehicle_list()
+            except TokenRefreshError as e:
+                _LOGGER.info("Token refresh failed: %s. Re-authenticating...", e)
+                self._reset_auth_state()
             except Exception as e:
-                _LOGGER.info("Cached tokens expired or invalid: %s. Re-authenticating...", e)
-                self._token_store.clear()
-                self._client = None
-                self._actions = None
+                # The freshness gate keys off the MBB expiry (1h), but the AZS
+                # token dies much sooner (~10min) — a restore can pass the gate
+                # and still fail validation here. Force-refresh all 3 tokens and
+                # retry once before surrendering to a full login, which on EU
+                # would cost an interactive device-code approval.
+                _LOGGER.info("Cached tokens rejected (%s) — forcing a token refresh...", e)
+                try:
+                    await self.refresh_tokens(self._restored_age_sec, force=True)
+                    return await self.client.get_vehicle_list()
+                except Exception as e2:
+                    _LOGGER.info("Forced refresh failed: %s. Re-authenticating...", e2)
+                    self._reset_auth_state()
 
         _LOGGER.info("Starting login to Audi Connect...")
         if uses_device_code(self._country):
@@ -198,12 +208,22 @@ class AudiAuth:
         _LOGGER.info("Login successful!")
         return await self.client.get_vehicle_list()
 
-    async def refresh_tokens(self, elapsed_sec: int) -> bool:
+    def _reset_auth_state(self) -> None:
+        """Drop cached tokens and delegates ahead of a fresh full login."""
+        self._token_store.clear()
+        self._client = None
+        self._actions = None
+
+    async def refresh_tokens(self, elapsed_sec: int, force: bool = False) -> bool:
         """Refresh all tokens if they are about to expire.
 
         Called by AudiClient.ensure_auth() before falling back to a
         full login. Costs 3 upstream round-trips (MBB + IDK + AZS)
         vs ~10 for a full login.
+
+        ``force=True`` bypasses the freshness gate (which keys off the MBB
+        expiry) — used when a restored session fails validation because a
+        shorter-lived token (AZS, ~10min) already died.
 
         Returns True if a refresh actually happened, False if the
         existing tokens are still valid enough not to need refreshing.
@@ -214,7 +234,7 @@ class AudiAuth:
             return False
         if "expires_in" not in self._state.mbb_oauth_token:
             return False
-        if (elapsed_sec + 5 * 60) < self._state.mbb_oauth_token["expires_in"]:
+        if not force and (elapsed_sec + 5 * 60) < self._state.mbb_oauth_token["expires_in"]:
             return False
 
         try:
