@@ -1,5 +1,7 @@
 """Tests for audi_connect.auth module."""
 
+import time
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -105,24 +107,97 @@ class TestLogin:
         assert result == [{"vin": "TEST"}]
 
     @pytest.mark.asyncio
-    async def test_login_fresh_when_no_cache(self):
+    async def test_login_stale_cache_refreshes_instead_of_full_login(self):
+        """A restored-but-stale cache must refresh via refresh tokens, not
+        fall through to a full (interactive on EU) login."""
+        api = MagicMock()
+        api.set_xclient_id = MagicMock()
+        api.use_token = MagicMock()
+        cached = _make_tokens()
+        cached["saved_at"] = time.time() - 7200  # 2h old: access tokens dead
+        store = _make_token_store(cached=cached)
+
+        auth = AudiAuth(api, country="DE", token_store=store)
+        auth._oauth = AsyncMock()
+        auth._oauth.refresh_tokens = AsyncMock(return_value={
+            "bearer_token": {"access_token": "new_bearer", "refresh_token": "br_ref2"},
+            "audi_token": {"access_token": "new_audi"},
+            "vw_token": {"access_token": "new_vw"},
+            "mbb_oauth_token": {"refresh_token": "mbb_ref", "expires_in": 3600},
+        })
+
+        with patch.object(AudiVehicleClient, "get_vehicle_list", AsyncMock(return_value=[{"vin": "X"}])):
+            result = await auth.login("user@test.com", "password123")
+
+        assert result == [{"vin": "X"}]
+        auth._oauth.refresh_tokens.assert_awaited_once()
+        auth._oauth.login_device_code.assert_not_awaited()
+        auth._oauth.login.assert_not_awaited()
+        assert auth._state.bearer_token["access_token"] == "new_bearer"
+
+    @pytest.mark.asyncio
+    async def test_login_dead_refresh_token_falls_back_to_device_code(self):
+        """Only a dead refresh token justifies a new interactive login."""
+        api = MagicMock()
+        api.set_xclient_id = MagicMock()
+        api.use_token = MagicMock()
+        cached = _make_tokens()
+        cached["saved_at"] = time.time() - 7200
+        store = _make_token_store(cached=cached)
+
+        auth = AudiAuth(api, country="DE", token_store=store)
+        auth._oauth = AsyncMock()
+        auth._oauth.refresh_tokens = AsyncMock(side_effect=Exception("invalid_grant"))
+        auth._oauth.login_device_code = AsyncMock(return_value=_make_tokens())
+
+        with patch.object(AudiVehicleClient, "get_vehicle_list", AsyncMock(return_value=[])):
+            await auth.login("user@test.com", "password123")
+
+        auth._oauth.login_device_code.assert_awaited_once()
+        store.clear.assert_called()  # stale cache dropped before re-login
+
+    @pytest.mark.asyncio
+    async def test_login_fresh_when_no_cache_eu_uses_device_code(self):
         api = MagicMock()
         api.set_xclient_id = MagicMock()
         store = _make_token_store(cached=None)
         tokens = _make_tokens()
 
+        # DE is a device-code region since July 2026 (Play Integrity).
         auth = AudiAuth(api, country="DE", token_store=store)
 
-        # Mock the oauth login
+        auth._oauth = AsyncMock()
+        auth._oauth.login_device_code = AsyncMock(return_value=tokens)
+
+        cb = MagicMock()
+        # login() now ends with await self.client.get_vehicle_list() — patch it
+        # on the AudiVehicleClient class so the freshly built delegate is mocked.
+        with patch.object(AudiVehicleClient, "get_vehicle_list", AsyncMock(return_value=[])):
+            await auth.login("user@test.com", "password123", on_verification=cb)
+
+        auth._oauth.login_device_code.assert_awaited_once_with(on_verification=cb)
+        auth._oauth.login.assert_not_awaited()
+        store.save.assert_called_once()
+        assert auth._client is not None
+
+    @pytest.mark.asyncio
+    async def test_login_fresh_when_no_cache_us_uses_password(self):
+        api = MagicMock()
+        api.set_xclient_id = MagicMock()
+        store = _make_token_store(cached=None)
+        tokens = _make_tokens()
+
+        # US keeps the legacy username/password flow.
+        auth = AudiAuth(api, country="US", token_store=store)
+
         auth._oauth = AsyncMock()
         auth._oauth.login = AsyncMock(return_value=tokens)
 
-        # login() now ends with await self.client.get_vehicle_list() — patch it
-        # on the AudiVehicleClient class so the freshly built delegate is mocked.
         with patch.object(AudiVehicleClient, "get_vehicle_list", AsyncMock(return_value=[])):
             await auth.login("user@test.com", "password123")
 
         auth._oauth.login.assert_awaited_once_with("user@test.com", "password123")
+        auth._oauth.login_device_code.assert_not_awaited()
         store.save.assert_called_once()
         assert auth._client is not None
 

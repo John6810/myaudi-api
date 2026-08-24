@@ -51,18 +51,40 @@ class TestTokenStore:
         store = TokenStore(tmp_token_file)
         assert store.load() is None
 
+    def _age_file(self, path, seconds):
+        """Rewrite saved_at so the stored tokens look `seconds` old."""
+        with open(path, "r") as f:
+            data = json.load(f)
+        data["saved_at"] = time.time() - seconds
+        with open(path, "w") as f:
+            json.dump(data, f)
+
     def test_load_expired(self, tmp_token_file):
         store = TokenStore(tmp_token_file)
         store.save(_make_state())
-
-        # Manually set saved_at to the past
-        with open(tmp_token_file, "r") as f:
-            data = json.load(f)
-        data["saved_at"] = time.time() - 7200  # 2 hours ago
-        with open(tmp_token_file, "w") as f:
-            json.dump(data, f)
+        self._age_file(tmp_token_file, 7200)  # 2 hours ago
 
         assert store.load(max_age_seconds=3600) is None
+        assert not os.path.exists(tmp_token_file)
+
+    def test_load_default_survives_hours_old_cache(self, tmp_token_file):
+        # Access tokens die after ~1h but the refresh tokens live for weeks —
+        # a 2-day-old file must still load with defaults (EU device-code:
+        # deleting it would force a manual re-approval).
+        store = TokenStore(tmp_token_file)
+        store.save(_make_state())
+        self._age_file(tmp_token_file, 2 * 24 * 3600)  # 2 days ago
+
+        loaded = store.load()
+        assert loaded is not None
+        assert loaded["bearer_token"]["refresh_token"] == "br_ref"
+
+    def test_load_default_clears_ancient_cache(self, tmp_token_file):
+        store = TokenStore(tmp_token_file)
+        store.save(_make_state())
+        self._age_file(tmp_token_file, 40 * 24 * 3600)  # 40 days ago
+
+        assert store.load() is None
         assert not os.path.exists(tmp_token_file)
 
     def test_clear(self, tmp_token_file):

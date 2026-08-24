@@ -54,11 +54,28 @@ def _resolve_vin(args) -> str | None:
     return args.vin or DEFAULT_VIN
 
 
+def _print_device_verification(info: dict) -> None:
+    """Show the one-time device-code approval prompt (EU regions)."""
+    url = info.get("verification_uri_complete") or info.get("verification_uri")
+    print("\n" + "=" * 60)
+    print("  One-time approval required (myAudi device login)")
+    print("=" * 60)
+    print("  1. Open this URL in a browser and sign in to your Audi account:")
+    print(f"\n     {info.get('verification_uri') or url}\n")
+    if info.get("user_code"):
+        print(f"  2. When prompted, enter this code: {info['user_code']}")
+    if info.get("verification_uri_complete"):
+        print(f"\n  (Or open this link — code pre-filled: {info['verification_uri_complete']})")
+    print("\n  Waiting for approval... (the refresh token is saved after, so")
+    print("  you won't need to do this again).\n")
+
+
 async def for_each_vehicle(args, callback):
     """Helper: connect, filter by VIN, and call callback for each vehicle."""
     async with create_session() as session:
         auth, vehicles = await connect_and_get_vehicles(
-            session, args.username, args.password, args.country, args.spin, args.api_level
+            session, args.username, args.password, args.country, args.spin, args.api_level,
+            on_verification=_print_device_verification,
         )
         target_vin = _resolve_vin(args)
         for vehicle in vehicles:

@@ -1,13 +1,14 @@
 """Authentication coordinator for Audi Connect — manages tokens and delegates to client/actions."""
 
 import logging
+import time
 from typing import Optional
 
 from .api import AudiAPI
 from .client import AudiVehicleClient
 from .actions import AudiVehicleActions
 from .endpoints import AudiEndpoints
-from .oauth import AudiOAuth
+from .oauth import AudiOAuth, uses_device_code
 from .oauth_state import OAuthState
 from .token_store import TokenStore
 from .exceptions import AuthenticationError, TokenRefreshError
@@ -29,6 +30,7 @@ class AudiAuth:
         self._oauth = AudiOAuth(api, country)
 
         self._state: Optional[OAuthState] = None
+        self._restored_age_sec: int = 0  # age of cache-restored tokens (0 = fresh login)
 
         # Delegates (created after login)
         self._client: Optional[AudiVehicleClient] = None
@@ -128,7 +130,12 @@ class AudiAuth:
     # --- Token persistence ---
 
     def _try_restore_tokens(self) -> bool:
-        """Try to restore tokens from cache. Returns True if successful."""
+        """Try to restore tokens from cache. Returns True if successful.
+
+        Records the cache age in ``_restored_age_sec`` so login() can refresh
+        stale access tokens instead of falling back to a full (interactive on
+        EU) login.
+        """
         cached = self._token_store.load()
         if cached is None:
             return False
@@ -136,7 +143,8 @@ class AudiAuth:
         try:
             self._set_state(OAuthState.from_dict(cached))
             self._build_delegates()
-            _LOGGER.info("Restored tokens from cache")
+            self._restored_age_sec = int(time.time() - cached.get("saved_at", 0))
+            _LOGGER.info("Restored tokens from cache (age: %ds)", self._restored_age_sec)
             return True
         except (KeyError, TypeError) as e:
             _LOGGER.debug("Failed to restore cached tokens: %s", e)
@@ -150,8 +158,14 @@ class AudiAuth:
 
     # --- Login ---
 
-    async def login(self, user: str, password: str) -> list[dict]:
-        """Full authentication flow (13 steps). Uses cached tokens if available.
+    async def login(self, user: str, password: str, on_verification=None) -> list[dict]:
+        """Full authentication flow. Uses cached tokens if available.
+
+        For European regions this uses the device-code flow (Audi enforces Play
+        Integrity attestation on the password flow there since July 2026), which
+        requires a one-time manual approval; `on_verification` is called with the
+        approval prompt details (see AudiOAuth.login_device_code). US/CA/CN keep
+        the username/password flow.
 
         Returns the validated vehicle list (so callers can avoid an extra
         get_vehicle_list() round-trip; the list is fetched as part of token
@@ -159,6 +173,13 @@ class AudiAuth:
         """
         if self._try_restore_tokens():
             try:
+                # Stale access tokens (cache older than ~55min) are refreshed via
+                # the persisted refresh tokens rather than falling through to a
+                # full login — which on EU would demand a manual device-code
+                # re-approval. refresh_tokens() self-gates: fresh caches skip the
+                # upstream calls entirely. Only a dead refresh token (raises
+                # TokenRefreshError) drops us to the full login below.
+                await self.refresh_tokens(self._restored_age_sec)
                 return await self.client.get_vehicle_list()
             except Exception as e:
                 _LOGGER.info("Cached tokens expired or invalid: %s. Re-authenticating...", e)
@@ -167,7 +188,10 @@ class AudiAuth:
                 self._actions = None
 
         _LOGGER.info("Starting login to Audi Connect...")
-        tokens = await self._oauth.login(user, password)
+        if uses_device_code(self._country):
+            tokens = await self._oauth.login_device_code(on_verification=on_verification)
+        else:
+            tokens = await self._oauth.login(user, password)
         self._set_state(OAuthState.from_dict(tokens))
         self._build_delegates()
         self._save_tokens()

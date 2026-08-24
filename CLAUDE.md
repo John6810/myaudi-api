@@ -16,14 +16,15 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
 ## Architecture
 
 ### Core modules (`audi_connect/`)
-- **`oauth.py`** - `AudiOAuth`: the 13-step OAuth2/OIDC login flow (reverse-engineered from Android myAudi app v4.31.0):
-  1. Audi market config + OpenID Discovery
-  2. PKCE challenge + email/password login via HTML forms
-  3. IDK (bearer) token via code exchange
-  4. AZS (Audi) token via id_token grant
-  5. MBB OAuth client registration + MBB (VW Group) token
-  - Also handles token refresh (MBB, IDK, AZS)
-  - X-QMAuth header via HMAC-SHA256 with a secret from the APK and a 100s-window timestamp
+- **`oauth.py`** - `AudiOAuth`: the OAuth2/OIDC login flow (reverse-engineered from Android myAudi app v4.31.0). Two region-gated front halves converge on a shared tail:
+  1. `_fetch_login_config()` — Audi market config + OpenID Discovery (shared)
+  2. **Front half A — device-code (EU, RFC 8628)**: `login_device_code()` requests a device+user code, surfaces a verification URL for one-time manual approval (`on_verification` callback / logged), then `_poll_device_token()` polls until approved → IDK bearer. **No X-QMAuth / no Play Integrity attestation** on these requests.
+     - **Front half B — password (US/CA/CN)**: `login()` does PKCE + email/password HTML login + IDK token via code exchange (uses X-QMAuth).
+  3. `_finalize_session()` — AZS (Audi) token via id_token grant, then MBB OAuth client registration + MBB (VW Group) token (shared tail, identical for both paths)
+  - `uses_device_code(country)` selects the path: EU → device-code, `{US, CA, CN}` → password
+  - Also handles token refresh (MBB, IDK, AZS); once device-code approval is done, the persisted refresh token keeps sessions non-interactive
+  - X-QMAuth header (password flow only) via HMAC-SHA256 with a secret from the APK and a 100s-window timestamp
+  - **Why device-code**: since July 2026 Audi enforces Play Integrity attestation on the EU password/code-exchange step (returns `invalid assertion headers`); the device-code grant sidesteps it. See upstream audi_connect_ha #772.
 - **`oauth_state.py`** - `OAuthState`: frozen dataclass holding all 10 OAuth tokens / endpoint URLs after login
   - `from_dict(d)` builds from oauth login result or TokenStore.load
   - `to_dict()` for serialization
@@ -65,7 +66,7 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
 - **`logging_utils.py`** - `redact()` helper + `RedactingFilter` (logging filter, installed at startup in `server.py` and `main.py`)
   - Masks bearer tokens, JSON OAuth values (`access_token`, `refresh_token`, `id_token`, `securityToken`, `securityPinHash`, `password`, `spin`, `client_secret`, `code_verifier`), `X-QMAuth` HMAC values, and emails (`xxx***@domain`)
   - Belt-and-suspenders: `aiohttp.*` loggers pinned to WARNING regardless of root level
-- **`token_store.py`** - OAuth token persistence in `~/.audi_connect_tokens.json` (1h TTL, 0o600 permissions on Linux/Mac)
+- **`token_store.py`** - OAuth token persistence in `~/.audi_connect_tokens.json` (30-day max age — the file carries the refresh tokens, and dropping it early would force a manual device-code re-approval on EU; 0o600 permissions on Linux/Mac). Stale access tokens are refreshed on restore in `AudiAuth.login` via `refresh_tokens(cache_age)`, which self-gates on fresh caches; only a dead refresh token falls back to a full (interactive on EU) login.
 
 ### Entry points
 - **`server.py`** (root, formerly `api.py`) - FastAPI REST API server:
@@ -191,10 +192,11 @@ POST /{vin}/heater/stop   Stop heater
 ```
 
 ## Important notes
-- Authentication is complex (13 steps with HTML parsing, PKCE, multiple token exchanges) — reverse-engineered from the Android myAudi app v4.31.0
+- Authentication is complex — reverse-engineered from the Android myAudi app v4.31.0. **EU regions use the device-code flow (RFC 8628)** since July 2026 (Audi enforces Play Integrity attestation on the old EU password/code-exchange step). US/CA/CN keep the password flow. Region gating via `uses_device_code(country)` in `oauth.py`.
+- **Device-code = one-time manual approval**: the first EU login prints/logs a `identity.vwgroup.io/oidc/device/audi?user_code=…` URL; the user opens it, signs in and approves (within `expires_in`, ~300s). After that the refresh token is persisted (`~/.audi_connect_tokens.json`) and every later session refreshes non-interactively. CLI shows the prompt (`_print_device_verification` in `main.py`); server logs it at WARNING (`server.py`). For K8s: approve once at first boot, or generate the token locally and inject the token file into the pod.
 - The OAuth flow lives in `oauth.py`, the coordinator in `auth.py` (separated for testability)
 - Two API levels coexist: legacy (MBB/VW) and new (CARIAD) — the code supports both
-- Tokens are cached in `~/.audi_connect_tokens.json` (1h TTL, restricted permissions on Unix)
+- Tokens are cached in `~/.audi_connect_tokens.json` (30-day max age, restricted permissions on Unix). On restore, stale access tokens are refreshed via the persisted refresh tokens; a manual device-code re-approval (EU) is only needed if the refresh token itself is dead (or the file is >30 days old).
 - Vehicle data fetches run in parallel via `asyncio.gather()` for better performance
 - Cache is auto-invalidated after actions (lock, climate, etc.) so next status reflects changes
 - Action endpoints support `?confirm=true` to wait 5s and verify the action was applied

@@ -20,6 +20,13 @@ _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TOKEN_FILE = os.path.join(Path.home(), ".audi_connect_tokens.json")
 
+# Access tokens only live ~1h, but the file also carries the refresh tokens,
+# which live for weeks — and with the EU device-code flow, losing them costs a
+# manual re-approval. So the file is kept generously long; stale access tokens
+# are refreshed on restore (see AudiAuth.login), and the file is only dropped
+# when it is old enough that the refresh tokens themselves are surely dead.
+DEFAULT_MAX_AGE_SECONDS = 30 * 24 * 3600  # 30 days
+
 
 class TokenStore:
     """Persists OAuth tokens to a JSON file for reuse across sessions."""
@@ -46,11 +53,17 @@ class TokenStore:
         except OSError as e:
             _LOGGER.warning("Failed to save tokens: %s", e)
 
-    def load(self, max_age_seconds: int = 3600) -> Optional[dict]:
+    def load(self, max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS) -> Optional[dict]:
         """Load tokens from disk if they exist and are not too old.
 
+        The returned dict includes ``saved_at`` so callers can decide whether
+        the access tokens are stale and need a refresh (AudiAuth does this on
+        restore). The file is only cleared past ``max_age_seconds``, when the
+        refresh tokens themselves are presumed dead — deleting it earlier would
+        force a manual device-code re-approval on EU accounts.
+
         Args:
-            max_age_seconds: Maximum age of saved tokens in seconds (default: 1 hour).
+            max_age_seconds: Maximum age of saved tokens in seconds (default: 30 days).
 
         Returns:
             Token data dict or None if unavailable/expired.
