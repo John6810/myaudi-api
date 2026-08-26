@@ -231,16 +231,19 @@ class AudiClient:
             if self._auth is not None and self.authenticated:
                 elapsed = int(time.time() - self._auth_time)
                 try:
-                    if await self._auth.refresh_tokens(elapsed):
+                    # force=True: our refresh interval (45min) is shorter than
+                    # the MBB expiry the freshness gate keys on (1h). Without
+                    # force, the gate declined every 45min call, the timestamp
+                    # was reset anyway, and elapsed never reached the gate's
+                    # threshold — tokens silently died at the 1h mark and every
+                    # Audi call 401'd until a pod restart. Seen in prod.
+                    if await self._auth.refresh_tokens(elapsed, force=True):
                         self._auth_time = time.time()
                         log.info("Tokens refreshed (no full re-login)")
                         audi_auth_refresh_total.labels(result="refresh_success").inc()
                         return True
-                    # refresh_tokens returned False — tokens still valid
-                    # enough that no refresh was needed. Just bump the
-                    # timestamp to skip retrying for another interval.
-                    self._auth_time = time.time()
-                    return True
+                    # False — no usable auth context (e.g. missing refresh
+                    # token): fall through to full login.
                 except Exception as e:
                     log.warning("Token refresh failed (%s) — falling back to full login", e)
                     audi_auth_refresh_total.labels(result="refresh_failure").inc()
