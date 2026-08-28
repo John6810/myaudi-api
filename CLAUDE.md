@@ -41,7 +41,7 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
 - **`client.py`** - `AudiVehicleClient`: read-only API calls (vehicle status, position, trips). Receives an `AudiEndpoints` instance instead of building URLs itself.
 - **`actions.py`** - `AudiVehicleActions`: remote actions (lock/unlock, climate control, heater)
   - Receives an `AudiEndpoints` instance (no longer reaches into `client._get_*` privates)
-  - S-PIN hash (SHA-512) for secured actions (lock/unlock)
+  - Lock/unlock: CARIAD path (api_level 1) sends the plaintext S-PIN in the JSON body to `/access/{lock|unlock}`; legacy path (api_level 0) uses the S-PIN hash (SHA-512) + rolesrights challenge for `rlu_v1`
   - Legacy MBB API uses deciKelvin for temperature: `temp_c * 10 + 2731`
 - **`api.py`** - Low-level HTTP client (GET/POST with myAudi headers, 30s timeout, 3x retry with exponential backoff on transport errors)
 - **`connection.py`** - Shared helpers: `create_session()` (SSL via certifi), `connect_and_get_vehicles()`
@@ -110,7 +110,8 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
 
 ### CARIAD API (new, api_level=1)
 - Base URL: `https://emea.bff.cariad.digital` (EU) or `https://na.bff.cariad.digital` (US)
-- Endpoints: `/vehicle/v1/vehicles/{vin}/selectivestatus`, `/parkingposition`, `/climatisation/start|stop`, `/auxiliaryheating/start|stop`, `/charging/mode`
+- Endpoints: `/vehicle/v1/vehicles/{vin}/selectivestatus`, `/parkingposition`, `/climatisation/start|stop`, `/auxiliaryheating/start|stop`, `/charging/mode`, `/access/lock|unlock`
+- **Lock/unlock (api_level 1)**: `POST /vehicle/v1/vehicles/{vin}/access/{lock|unlock}` with IDK bearer + JSON body `{"spin": "<plaintext S-PIN>"}` — no rolesrights challenge, no SHA-512 hash. The legacy MBB `rlu_v1` flow (below) returns **403** on CARIAD EVs (e.g. Q4 e-tron) where that service isn't provisioned, so `api_level=1` routes lock/unlock through CARIAD instead.
 - Auth: IDK bearer token
 
 ### MBB/VW Group API (legacy, api_level=0)
