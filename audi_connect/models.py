@@ -10,20 +10,27 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class LockState(str, Enum):
-    """Door lock states from the Audi API."""
+    """Door lock states from the Audi API.
+
+    ``CLOSED`` remains the canonical member for value ``"3"`` for compatibility.
+    New code should use the semantically accurate ``UNLOCKED`` alias.
+    """
     UNKNOWN = "0"
     LOCKED = "2"
     CLOSED = "3"
+    UNLOCKED = "3"
 
 
 class DoorState(str, Enum):
     """Door open/close states from the Audi API."""
     UNKNOWN = "0"
+    OPEN = "2"
     CLOSED = "3"
 
 
 class WindowState(str, Enum):
     """Window open/close states from the Audi API."""
+    UNKNOWN = "unknown"
     OPEN = "0"
     CLOSED = "3"
 
@@ -54,6 +61,7 @@ class VehicleDataResponse:
         self.data_fields: list["Field"] = []
         self.states: list[dict] = []
         self._fields_by_name: dict[str, "Field"] = {}
+        self._legacy_access_fields_by_name: dict[str, "Field"] = {}
         self._states_by_name: dict[str, dict] = {}
 
         # Range and fuel
@@ -116,6 +124,10 @@ class VehicleDataResponse:
     def get_state(self, name: str) -> Optional[dict]:
         return self._states_by_name.get(name)
 
+    def get_legacy_access_field(self, name: str) -> Optional["Field"]:
+        """Return the compatibility view used by pre-structured access helpers."""
+        return self._legacy_access_fields_by_name.get(name)
+
     def _get_from_json(self, json_data: dict, loc: list[str]) -> Any:
         child = json_data
         for key in loc:
@@ -152,19 +164,39 @@ class VehicleDataResponse:
             name = door.get("name", "")
             if name + "Lock" not in self.OLDAPI_MAPPING:
                 continue
-            lock = LockState.UNKNOWN.value
-            open_state = DoorState.UNKNOWN.value
-            unsupported = False
-            for state in status:
-                if state == "unsupported":
-                    unsupported = True
-                if state == "locked":
-                    lock = LockState.LOCKED.value
-                if state == "closed":
-                    open_state = DoorState.CLOSED.value
-            if not unsupported:
-                self.data_fields.append(Field({"textId": self.OLDAPI_MAPPING[name + "Lock"], "value": lock, "tsCarCaptured": ts}))
-                self.data_fields.append(Field({"textId": self.OLDAPI_MAPPING[name + "Open"], "value": open_state, "tsCarCaptured": ts}))
+            states = set(status)
+            if "unsupported" not in states:
+                lock_name = self.OLDAPI_MAPPING[name + "Lock"]
+                open_name = self.OLDAPI_MAPPING[name + "Open"]
+
+                # Preserve the exact pre-structured interpretation for legacy
+                # combined fields while normalizing explicit values below.
+                self._legacy_access_fields_by_name[lock_name] = Field({
+                    "textId": lock_name,
+                    "value": LockState.LOCKED.value if "locked" in states else LockState.UNKNOWN.value,
+                    "tsCarCaptured": ts,
+                })
+                self._legacy_access_fields_by_name[open_name] = Field({
+                    "textId": open_name,
+                    "value": DoorState.CLOSED.value if "closed" in states else DoorState.UNKNOWN.value,
+                    "tsCarCaptured": ts,
+                })
+
+                locked = "locked" in states
+                unlocked = "unlocked" in states
+                opened = "open" in states
+                closed = "closed" in states
+
+                lock = LockState.UNKNOWN.value
+                if locked != unlocked:
+                    lock = LockState.LOCKED.value if locked else LockState.UNLOCKED.value
+
+                open_state = DoorState.UNKNOWN.value
+                if opened != closed:
+                    open_state = DoorState.OPEN.value if opened else DoorState.CLOSED.value
+
+                self.data_fields.append(Field({"textId": lock_name, "value": lock, "tsCarCaptured": ts}))
+                self.data_fields.append(Field({"textId": open_name, "value": open_state, "tsCarCaptured": ts}))
 
     def _append_window_state(self, data: dict) -> None:
         windows = get_attr(data, "access.accessStatus.value.windows", [])
@@ -172,13 +204,32 @@ class VehicleDataResponse:
         for window in windows:
             name = window.get("name", "")
             status = window.get("status", [])
-            if not status or status[0] == "unsupported" or name + "Window" not in self.OLDAPI_MAPPING:
+            if not status or name + "Window" not in self.OLDAPI_MAPPING:
                 continue
-            self.data_fields.append(Field({
-                "textId": self.OLDAPI_MAPPING[name + "Window"],
-                "value": WindowState.CLOSED.value if status[0] == "closed" else WindowState.OPEN.value,
-                "tsCarCaptured": ts,
-            }))
+            field_name = self.OLDAPI_MAPPING[name + "Window"]
+
+            # The historical parser inspected only status[0]. Keep that view
+            # solely for legacy combined fields; structured state scans all
+            # statuses and handles contradictions independently below.
+            if status[0] != "unsupported":
+                self._legacy_access_fields_by_name[field_name] = Field({
+                    "textId": field_name,
+                    "value": WindowState.CLOSED.value if status[0] == "closed" else WindowState.OPEN.value,
+                    "tsCarCaptured": ts,
+                })
+
+            states = set(status)
+            if "unsupported" not in states:
+                opened = "open" in states
+                closed = "closed" in states
+                value = WindowState.UNKNOWN.value
+                if opened != closed:
+                    value = WindowState.OPEN.value if opened else WindowState.CLOSED.value
+                self.data_fields.append(Field({
+                    "textId": field_name,
+                    "value": value,
+                    "tsCarCaptured": ts,
+                }))
 
 
 class Field:

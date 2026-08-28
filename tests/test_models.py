@@ -147,6 +147,91 @@ class TestVehicleDataResponse:
         assert len(closed_windows) == 1
         assert len(open_windows) == 1
 
+    def test_window_state_searches_full_status_list(self):
+        data = {
+            "access": {
+                "accessStatus": {
+                    "value": {
+                        "carCapturedTimestamp": "2024-01-01T00:00:00+0000",
+                        "doors": [],
+                        "windows": [
+                            {"name": "frontLeft", "status": ["unknown", "open"]},
+                            {"name": "frontRight", "status": ["unknown", "closed"]},
+                            {"name": "rearLeft", "status": ["open", "unsupported"]},
+                        ],
+                    }
+                }
+            }
+        }
+
+        vdr = VehicleDataResponse(data)
+        assert vdr.get_field("STATE_LEFT_FRONT_WINDOW").value == WindowState.OPEN.value
+        assert vdr.get_field("STATE_RIGHT_FRONT_WINDOW").value == WindowState.CLOSED.value
+        assert vdr.get_field("STATE_LEFT_REAR_WINDOW") is None
+
+    def test_window_state_remains_unknown_without_explicit_state(self):
+        data = {
+            "access": {
+                "accessStatus": {
+                    "value": {
+                        "carCapturedTimestamp": "2024-01-01T00:00:00+0000",
+                        "doors": [],
+                        "windows": [
+                            {"name": "frontLeft", "status": ["unknown"]},
+                            {"name": "frontRight", "status": []},
+                        ],
+                    }
+                }
+            }
+        }
+
+        vdr = VehicleDataResponse(data)
+        assert vdr.get_field("STATE_LEFT_FRONT_WINDOW").value == WindowState.UNKNOWN.value
+        # Empty status lists were historically omitted and remain so for
+        # compatibility; absence is exposed as None by the structured API.
+        assert vdr.get_field("STATE_RIGHT_FRONT_WINDOW") is None
+
+    @pytest.mark.parametrize("status", [["open", "closed"], ["closed", "open"]])
+    def test_contradictory_window_state_is_unknown_regardless_of_order(self, status):
+        data = {
+            "access": {
+                "accessStatus": {
+                    "value": {
+                        "carCapturedTimestamp": "2024-01-01T00:00:00+0000",
+                        "doors": [],
+                        "windows": [{"name": "frontLeft", "status": status}],
+                    }
+                }
+            }
+        }
+
+        field = VehicleDataResponse(data).get_field("STATE_LEFT_FRONT_WINDOW")
+        assert field.value == WindowState.UNKNOWN.value
+
+    @pytest.mark.parametrize(
+        ("status", "field_name", "expected"),
+        [
+            (["locked", "unlocked", "closed"], "LOCK_STATE_LEFT_FRONT_DOOR", LockState.UNKNOWN.value),
+            (["unlocked", "locked", "closed"], "LOCK_STATE_LEFT_FRONT_DOOR", LockState.UNKNOWN.value),
+            (["locked", "open", "closed"], "OPEN_STATE_LEFT_FRONT_DOOR", DoorState.UNKNOWN.value),
+            (["locked", "closed", "open"], "OPEN_STATE_LEFT_FRONT_DOOR", DoorState.UNKNOWN.value),
+        ],
+    )
+    def test_contradictory_door_state_is_unknown_regardless_of_order(self, status, field_name, expected):
+        data = {
+            "access": {
+                "accessStatus": {
+                    "value": {
+                        "carCapturedTimestamp": "2024-01-01T00:00:00+0000",
+                        "doors": [{"name": "frontLeft", "status": status}],
+                        "windows": [],
+                    }
+                }
+            }
+        }
+
+        assert VehicleDataResponse(data).get_field(field_name).value == expected
+
 
 class TestTripDataResponse:
     def test_full_data(self):
@@ -186,7 +271,10 @@ class TestEnums:
     def test_lock_state_values(self):
         assert LockState.UNKNOWN.value == "0"
         assert LockState.LOCKED.value == "2"
+        assert LockState.UNLOCKED.value == "3"
         assert LockState.CLOSED.value == "3"
+        assert LockState.CLOSED is LockState.UNLOCKED
+        assert LockState("3").name == "CLOSED"
 
     def test_door_state_values(self):
         assert DoorState.UNKNOWN.value == "0"

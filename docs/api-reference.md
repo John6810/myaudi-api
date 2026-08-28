@@ -49,6 +49,49 @@ curl -H "X-API-Key: $AUDI_API_KEY" http://localhost:8000/vehicles
 - Rate limit: 30/min.
 - Query: `?vin=<VIN>` (optional, filters to one vehicle).
 - Returns: `{"count": int, "vehicles": [{"vin", "model", "title", **dashboard}]}` — the dashboard dict is `AudiVehicle.get_dashboard()`.
+- `access` is the structured vehicle access state. Diagnostic Boolean values are `null` when Audi reports an unknown, unsupported, missing, or contradictory value:
+
+```json
+{
+  "access": {
+    "state": "unlocked",
+    "open_access_points": [],
+    "doors": {
+      "front_left": {"locked": false, "open": false},
+      "front_right": {"locked": false, "open": false},
+      "rear_left": {"locked": false, "open": false},
+      "rear_right": {"locked": false, "open": false}
+    },
+    "liftgate": {"locked": false, "open": false},
+    "hood": {"open": false},
+    "windows": {
+      "front_left": false,
+      "front_right": false,
+      "rear_left": null,
+      "rear_right": null
+    },
+    "open_windows": [],
+    "sunroof_open": null,
+    "roof_cover_open": null,
+    "secure": false
+  }
+}
+```
+
+`state` is the primary doors/liftgate condition:
+
+- `locked`: all four doors and the liftgate are explicitly closed and every required lock state is explicitly locked.
+- `unlocked`: all five lockable closures are explicitly closed and trustworthy lock data establishes that the vehicle is not fully locked. A lock command should be able to succeed.
+- `open`: one or more lockable closures are explicitly open. `open_access_points` identifies them using stable names.
+- `unknown`: required lock or closure data is unavailable, unsupported, contradictory, or incomplete.
+
+Windows and sunroof do not affect `state` or whether the vehicle can accept a lock command. `open_windows` lists explicitly open ordinary windows. `sunroof_open` is independent, and `roof_cover_open` keeps the shade/cover separate from the sunroof.
+
+`secure` is `true` only when `state` is `locked`, all four ordinary windows are explicitly closed, and the sunroof is explicitly closed. It is `false` when a required condition is explicitly unsatisfied and `null` when a required condition is unknown. Contradictory telemetry—such as locked fields combined with an open closure—remains visible in the detailed fields, produces `state: "open"`, and should be treated as stale or inconsistent data rather than a normal physical state.
+
+`doors_trunk` is a **legacy combined value** retained for compatibility. It can be `Open`, `Closed`, or `Locked` and must not be treated as a pure lock state; use `access` for new integrations.
+
+The Home Assistant sensor, server goodnight check, and action-confirmation logic continue to use legacy compatibility fields in this release. Migrating those consumers to structured access state is intentionally deferred to a separate change so this API addition does not alter their behavior.
 
 ### `GET /brief`
 
@@ -56,6 +99,7 @@ curl -H "X-API-Key: $AUDI_API_KEY" http://localhost:8000/vehicles
 - Rate limit: 30/min.
 - Query: `?vin=<VIN>` (optional).
 - Returns: `{"vehicles": [brief]}` — `brief` is `AudiVehicle.get_brief()` (locked, position, range, battery/fuel).
+- `brief["locked"]` is a **legacy combined value** retained for compatibility. Despite its name, it can be `Open`, `Closed`, or `Locked`; use `/status` and its structured `access` object when lock and closure state must be distinguished.
 
 ### `GET /position`
 
