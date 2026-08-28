@@ -39,6 +39,28 @@ class AudiVehicleActions:
 
     async def set_vehicle_lock(self, vin: str, lock: bool) -> None:
         """Lock or unlock the vehicle. Requires S-PIN."""
+        if self._api_level == 1:
+            # CARIAD path: plaintext S-PIN in the JSON body, IDK bearer token
+            # (same token as climatisation). Replaces the legacy rlu_v1
+            # rolesrights challenge + SHA-512 hash + XML flow, which returns
+            # 403 on CARIAD EVs (e.g. Q4 e-tron) where the rlu_v1 service is
+            # not provisioned. Verb path: /vehicle/v1/vehicles/{vin}/access/{lock|unlock}.
+            if self._spin is None:
+                raise SpinRequiredError("S-PIN is required for this action (lock/unlock)")
+            headers = {
+                "Authorization": "Bearer " + self._bearer_token["access_token"],
+                "Content-Type": "application/json",
+            }
+            await self._api.request(
+                "POST",
+                self._endpoints.cariad_url_for_vin(
+                    vin, "access/" + ("lock" if lock else "unlock")
+                ),
+                headers=headers, data=json.dumps({"spin": self._spin}),
+            )
+            return
+
+        # Legacy MBB (api_level 0): rolesrights challenge + hashed S-PIN + XML.
         security_token = await self._get_security_token(
             vin, "rlu_v1/operations/" + ("LOCK" if lock else "UNLOCK")
         )

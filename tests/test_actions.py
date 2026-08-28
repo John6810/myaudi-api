@@ -102,6 +102,45 @@ class TestPreheater:
         assert "auxiliaryheating/stop" in call_args[0][1]
 
 
+class TestLockUnlock:
+    @pytest.mark.asyncio
+    async def test_lock_cariad_uses_access_endpoint_and_plaintext_spin(self):
+        actions = _make_actions(api_level=1, spin="1234")
+        await actions.set_vehicle_lock("WAUTEST", lock=True)
+        actions._api.request.assert_awaited_once()
+        args = actions._api.request.call_args
+        assert args[0][0] == "POST"
+        assert args[0][1].endswith("/vehicle/v1/vehicles/WAUTEST/access/lock")
+        import json
+        assert json.loads(args[1]["data"]) == {"spin": "1234"}
+        # IDK bearer token, not the legacy VW token; no rolesrights pre-call.
+        assert args[1]["headers"]["Authorization"] == "Bearer bearer_test"
+
+    @pytest.mark.asyncio
+    async def test_unlock_cariad_uses_access_unlock(self):
+        actions = _make_actions(api_level=1, spin="1234")
+        await actions.set_vehicle_lock("WAUTEST", lock=False)
+        args = actions._api.request.call_args
+        assert args[0][1].endswith("/access/unlock")
+
+    @pytest.mark.asyncio
+    async def test_lock_cariad_requires_spin(self):
+        actions = _make_actions(api_level=1, spin=None)
+        with pytest.raises(SpinRequiredError, match="S-PIN"):
+            await actions.set_vehicle_lock("WAUTEST", lock=True)
+        actions._api.request.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_lock_legacy_uses_rlu_rolesrights(self):
+        actions = _make_actions(api_level=0, spin="1234")
+        # Legacy path calls _get_security_token (rolesrights) then the rlu endpoint.
+        actions._get_security_token = AsyncMock(return_value="sec_tok")
+        await actions.set_vehicle_lock("WAUTEST", lock=True)
+        actions._get_security_token.assert_awaited_once()
+        args = actions._api.request.call_args
+        assert "/api/bs/rlu/v1/vehicles/WAUTEST/lock" in args[0][1]
+
+
 class TestActionHeaders:
     def test_header_without_security_token(self):
         actions = _make_actions()
