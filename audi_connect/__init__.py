@@ -9,6 +9,7 @@ from .models import VehicleDataResponse, TripDataResponse, LockState, DoorState,
 from .exceptions import (
     AudiConnectError,
     AuthenticationError,
+    DeviceGrantRejectedError,
     TokenRefreshError,
     VehicleNotFoundError,
     ActionFailedError,

@@ -17,15 +17,23 @@ from bs4 import BeautifulSoup
 
 from .api import AudiAPI
 from .endpoints import cariad_url
-from .exceptions import AuthenticationError, CountryNotSupportedError
+from .exceptions import (
+    AuthenticationError,
+    CountryNotSupportedError,
+    DeviceGrantRejectedError,
+)
+from .logging_utils import redact
 
 _LOGGER = logging.getLogger(__name__)
 
 # OAuth 2.0 Device Authorization Grant (RFC 8628).
 # Since July 2026 Audi enforces Play Integrity attestation on the password
 # (authorization-code) token exchange in Europe, so the legacy login can no
-# longer complete there. The device-code flow does not hit that exchange and is
-# therefore the working path for EU accounts. US/CA/CN keep the password flow.
+# longer complete there. The device-code flow avoids that exchange, but since
+# September 2026 Audi/VW has also refused new device grants for this client.
+# Keep the request path available in case the provider allows it; do not fall back to the
+# blocked password flow. Existing refresh tokens use a separate grant.
+# US/CA/CN keep the password flow.
 DEVICE_CODE_SCOPE = "openid mbb profile badge cars dealers vin"  # "mbb" needed for legacy lock/unlock/trips/climate
 DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 DEVICE_AUTH_ENDPOINT_FALLBACK = "https://identity.vwgroup.io/oidc/v1/device_authorization"
@@ -314,9 +322,10 @@ class AudiOAuth:
         )
         bearer_token_json = json.loads(bearer_token_rsptxt)
         if "access_token" not in bearer_token_json:
-            _LOGGER.error("Token exchange failed, response: %s", bearer_token_rsptxt)
+            detail = redact(bearer_token_rsptxt)
+            _LOGGER.error("Token exchange failed, response: %s", detail)
             raise AuthenticationError(
-                f"IDK token exchange did not return an access_token: {bearer_token_rsptxt[:500]}"
+                f"IDK token exchange did not return an access_token: {detail[:500]}"
             )
 
         return await self._finalize_session(bearer_token_json, config)
@@ -324,8 +333,9 @@ class AudiOAuth:
     async def login_device_code(self, on_verification=None) -> dict:
         """Device Authorization Grant (RFC 8628) login — EU regions.
 
-        Requires a one-time manual approval: the user opens the returned
-        verification URL, signs in and approves. The resulting refresh token is
+        When Audi/VW permits this client to use the grant, requires a one-time
+        manual approval: the user opens the returned verification URL, signs in
+        and approves. The resulting refresh token is
         then persisted so subsequent sessions refresh non-interactively.
 
         `on_verification`, if given, is called with a dict holding
@@ -339,7 +349,7 @@ class AudiOAuth:
         device_authorization_endpoint = config["device_authorization_endpoint"]
         token_endpoint = config["token_endpoint"]
 
-        # Step D1: Request a device + user code (no attestation required here).
+        # Step D1: Request a device + user code (no attestation header sent).
         _LOGGER.debug("Step D1: Requesting device authorization...")
         headers = {
             "Accept": "application/json",
@@ -357,10 +367,24 @@ class AudiOAuth:
             headers=headers, allow_redirects=False, rsp_wtxt=True,
         )
         device_init = json.loads(device_rsptxt)
+        if device_init.get("error") == "unauthorized_client":
+            # This is a client/grant refusal before credentials are submitted,
+            # not a user declining approval or an invalid username/password.
+            message = (
+                "Audi/VW refused the device-code grant for this client "
+                "(unauthorized_client), before user authentication. "
+                "This is not a username/password or S-PIN error."
+            )
+            description = device_init.get("error_description")
+            if isinstance(description, str) and description:
+                message += f" Server detail: {redact(description)[:500]}"
+            _LOGGER.error("%s", message)
+            raise DeviceGrantRejectedError(message)
         if "device_code" not in device_init:
-            _LOGGER.error("Device authorization failed, response: %s", device_rsptxt)
+            detail = redact(device_rsptxt)
+            _LOGGER.error("Device authorization failed, response: %s", detail)
             raise AuthenticationError(
-                f"Device authorization did not return a device_code: {device_rsptxt[:500]}"
+                f"Device authorization did not return a device_code: {detail[:500]}"
             )
 
         verification = {

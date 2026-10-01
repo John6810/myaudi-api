@@ -5,7 +5,7 @@ How tokens are obtained, cached, refreshed, and re-used across the three caching
 ## Three layers of caching/refresh
 
 1. **In-memory tokens** — held by an `AudiAuth` instance as a single `OAuthState` (frozen dataclass with 10 fields: bearer_token, audi_token, vw_token, mbb_oauth_token, xclient_id, client_id, token_endpoint, authorization_server_base_url, mbb_oauth_base_url, language). Lives for the duration of the process.
-2. **Filesystem token cache** — `~/.audi_connect_tokens.json` written by `TokenStore.save(state)`. Loaded on next start by `TokenStore.load()`. Default TTL: **3600 seconds (1 hour)**, validated by `TokenStore.load(max_age_seconds=3600)` against the embedded `saved_at` field. File mode `0o600` on Unix (no chmod on Windows). See [audi_connect/token_store.py](../audi_connect/token_store.py).
+2. **Filesystem token cache** — `~/.audi_connect_tokens.json` written by `TokenStore.save(state)`. Loaded on next start by `TokenStore.load()`. Default maximum age: **30 days**, checked against the embedded `saved_at` field. This is a cache policy, not a guarantee of token validity. Access tokens expire sooner; persisted refresh tokens allow non-interactive renewal. File mode `0o600` on Unix (no chmod on Windows). See [audi_connect/token_store.py](../audi_connect/token_store.py).
 3. **Server-side refresh interval** — `server.py` declares `TOKEN_REFRESH_INTERVAL = 45 * 60` (45 minutes). Beyond this, `AudiClient._needs_refresh()` returns True and `ensure_auth()` is allowed to renew tokens. The 45-min budget sits comfortably under the 1-hour token lifetime so refreshes happen before tokens expire.
 
 ## Token state machine
@@ -54,7 +54,7 @@ Note: when `refresh_tokens()` returns `False` (no refresh was needed because the
 
 ## Cache layer interaction
 
-- **At process start**: `AudiAuth.login()` calls `_try_restore_tokens()` first. If a valid filesystem cache exists (age < 1h), it is loaded into the in-memory `OAuthState` and validated by fetching the vehicle list (one GraphQL call). If validation succeeds, the full 13-step flow is skipped. If validation fails (token expired or revoked server-side), the cache is cleared and the full flow runs.
+- **At process start**: `AudiAuth.login()` calls `_try_restore_tokens()` first. A cache within the 30-day age limit is loaded into `OAuthState`; stale access tokens are refreshed before vehicle-list validation. If validation fails despite passing the freshness gate (for example, an expired AZS token), a forced refresh and one validation retry are attempted. Successful refresh persists rotated tokens. If refresh or validation still fails, the current implementation clears the cache and attempts full login; in EU this may then fail with `DeviceGrantRejectedError`.
 - **On successful full login**: `AudiAuth._save_tokens()` writes the new state to disk via `TokenStore.save(state)`. The on-disk format is identical to the pre-`OAuthState` shape (10 token fields + `saved_at`) — existing cache files migrate silently.
 - **On successful `refresh_tokens()`**: same — `_save_tokens()` is called, the freshly-rotated tokens land on disk and survive process restarts up to the TTL.
 - **`refresh_tokens()` does NOT re-fetch the vehicle list**. Only full `login()` does. This is intentional: refresh stays cheap.
@@ -66,6 +66,7 @@ Note: when `refresh_tokens()` returns `False` (no refresh was needed because the
   - 0–1 `refresh_failure`
   - 1–2 `success` (fallback full login)
   - ~0 `failure` (only on Audi outage or rate-limit lockout)
-- **Many `refresh_failure` falling through to login** → typically the password was changed in the myAudi app, or a session was revoked. Re-running `python main.py setup` and a one-shot login resolves it.
-- **Many `failure` (login)** → captcha rolled out, IP block, or X-QMAuth secret was rotated upstream. The latter is the worst case and requires re-extracting the secret from a fresh APK.
-- The 1-hour filesystem TTL is conservative. On a stable installation, the cache file is overwritten roughly every 45 min (after each refresh) so it rarely expires by age alone.
+- **Many `refresh_failure` falling through to login** → inspect the actual error; revoked tokens and network/backend errors can both cause failures. Re-running setup is not a guaranteed recovery: EU fresh login is currently refused for this client.
+- **`unauthorized_client` on EU device authorization** → client/grant refusal before user sign-in, not a credential or S-PIN error. See [EU login status](oauth-flow.md#eu-login-status-2026-10-01).
+- Preserve the token file across restarts/deployments; do not delete a working session to troubleshoot this refusal. Successful refresh rotates and saves tokens. Existing sessions may continue working while the provider accepts their refresh tokens, but this is not guaranteed indefinitely.
+- The 30-day cache limit and existing refresh/fallback behavior are unchanged by the device-grant diagnostic fix. A file past that limit is still cleared by `TokenStore.load()`; the client cannot recover a fresh EU session reliably if its cached session is unusable.

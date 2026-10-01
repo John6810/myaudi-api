@@ -24,7 +24,7 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
   - `uses_device_code(country)` selects the path: EU → device-code, `{US, CA, CN}` → password
   - Also handles token refresh (MBB, IDK, AZS); once device-code approval is done, the persisted refresh token keeps sessions non-interactive
   - X-QMAuth header (password flow only) via HMAC-SHA256 with a secret from the APK and a 100s-window timestamp
-  - **Why device-code**: since July 2026 Audi enforces Play Integrity attestation on the EU password/code-exchange step (returns `invalid assertion headers`); the device-code grant sidesteps it. See upstream audi_connect_ha #772.
+  - **Why device-code**: since July 2026 Audi enforces Play Integrity attestation on the EU password/code-exchange step (returns `invalid assertion headers`). Since September 2026 the device grant is also refused for this client (`unauthorized_client`, upstream #842/#846). `DeviceGrantRejectedError` identifies that refusal before user sign-in; no reliable replacement cold-start is verified as of 2026-10-01. Existing refresh remains separate and unchanged. See `docs/oauth-flow.md`.
 - **`oauth_state.py`** - `OAuthState`: frozen dataclass holding all 10 OAuth tokens / endpoint URLs after login
   - `from_dict(d)` builds from oauth login result or TokenStore.load
   - `to_dict()` for serialization
@@ -194,7 +194,7 @@ POST /{vin}/heater/stop   Stop heater
 
 ## Important notes
 - Authentication is complex — reverse-engineered from the Android myAudi app v4.31.0. **EU regions use the device-code flow (RFC 8628)** since July 2026 (Audi enforces Play Integrity attestation on the old EU password/code-exchange step). US/CA/CN keep the password flow. Region gating via `uses_device_code(country)` in `oauth.py`.
-- **Device-code = one-time manual approval**: the first EU login prints/logs a `identity.vwgroup.io/oidc/device/audi?user_code=…` URL; the user opens it, signs in and approves (within `expires_in`, ~300s). After that the refresh token is persisted (`~/.audi_connect_tokens.json`) and every later session refreshes non-interactively. CLI shows the prompt (`_print_device_verification` in `main.py`); server logs it at WARNING (`server.py`). For K8s: approve once at first boot, or generate the token locally and inject the token file into the pod.
+- **Device-code approval depends on provider permission**: if Audi/VW accepts the grant, the EU login prints/logs a verification URL and waits for one-time manual approval. A refused grant raises `DeviceGrantRejectedError` before any prompt; the CLI must not blame credentials. Keep working token files across deployments: valid refresh tokens may still work, but obtaining a fresh session locally or in a pod is currently unreliable. See `docs/oauth-flow.md` for the dated upstream findings and limits of the separate Data Act source.
 - The OAuth flow lives in `oauth.py`, the coordinator in `auth.py` (separated for testability)
 - Two API levels coexist: legacy (MBB/VW) and new (CARIAD) — the code supports both
 - Tokens are cached in `~/.audi_connect_tokens.json` (30-day max age, restricted permissions on Unix). On restore, stale access tokens are refreshed via the persisted refresh tokens; a manual device-code re-approval (EU) is only needed if the refresh token itself is dead (or the file is >30 days old).

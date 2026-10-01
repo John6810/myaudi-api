@@ -9,6 +9,10 @@ class AuthenticationError(AudiConnectError):
     """Raised when authentication fails (bad credentials, expired session, etc.)."""
 
 
+class DeviceGrantRejectedError(AuthenticationError):
+    """Audi/VW refused this client's device grant before user authentication."""
+
+
 class TokenRefreshError(AudiConnectError):
     """Raised when token refresh fails."""
 

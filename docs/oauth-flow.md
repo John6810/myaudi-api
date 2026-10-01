@@ -1,8 +1,65 @@
 # OAuth flow (13 steps)
 
+## EU login status (2026-10-01)
+
+New EU sessions currently have no verified reliable login path for this API.
+`AudiAuth.login()` still tries cached tokens first. Without a usable session,
+EU accounts use `AudiOAuth.login_device_code()`; US/CA/CN retain the password
+flow described below.
+
+The EU request uses `idkClientIDAndroidLive` from the market configuration, or
+`09b6cbec-cd19-4589-82fd-363dfa8c24da@apps_vw-dilab_com` as fallback. It posts
+`client_id` and `scope` to the discovered `device_authorization_endpoint`, or
+`https://identity.vwgroup.io/oidc/v1/device_authorization` as fallback.
+Audi/VW has returned HTTP 403 with `unauthorized_client` and
+`client is not allowed to use the device_code grant` for this exact client.
+This is a refusal of the client's grant **before user authentication**; no
+verification URL/code can be shown. It does not establish that the username,
+password, S-PIN, country configuration, or vehicle API level is wrong.
+
+The library raises `DeviceGrantRejectedError` (an `AuthenticationError`
+subclass) for `unauthorized_client` at this step. Its message identifies the
+grant refusal and includes the server's error description when present. The
+CLI shows this diagnosis and explains the limitations instead of asking users
+to change credentials. Other authentication errors retain their own reason.
+
+- Keep `~/.audi_connect_tokens.json` and its persisted refresh tokens. The
+  separate refresh-token grant is still reported working for existing sessions;
+  the refresh and rotation path is unchanged. It cannot create a session without
+  an existing valid token, and tokens can still expire or be revoked.
+- Do not force the old EU password flow: its authorization-code exchange is
+  blocked by Play Integrity attestation (`invalid assertion headers`).
+- Some upstream reports describe intermittent success; this is not a reliable
+  workaround. The device request remains enabled if Audi/VW permits it again.
+  The client does not automatically retry this refusal or switch login flows.
+
+Upstream evidence checked on 2026-10-01:
+
+- [audi_connect_ha #846](https://github.com/audiconnect/audi_connect_ha/issues/846)
+  reproduces the same 403/client ID and documents working persisted sessions.
+  Its closure on 2026-09-28 does **not** establish a repaired device grant.
+- [#842](https://github.com/audiconnect/audi_connect_ha/issues/842) describes an
+  Auth0 interactive PKCE provider behind a server flag, without a device flow.
+  Whether a usable non-app browser flow is exempt from attestation remains
+  unresolved; this is not a validated replacement we can port.
+- [Upstream authentication code at 1ca3b82](https://github.com/audiconnect/audi_connect_ha/blob/1ca3b82c4b95f9fc81d661107ebe44f02e64429e/custom_components/audiconnect/audi_services.py)
+  still requests the IDK device grant and restores sessions via refresh tokens.
+- #846 also reports Audi support through
+  [VWGroup-Connect's EU Data Act integration](https://github.com/its-me-prash/vwgroup-connect-ha).
+  That is a separate data source, not a way to obtain this API's IDK/AZS/MBB
+  session. Reports describe read-only data, 15-minute updates, a different
+  entity set and sometimes empty continuous feeds on new cars. It is not a
+  replacement for remote lock/unlock or a guaranteed complete data feed.
+
 ## Why a 13-step flow
 
-The myAudi mobile app authenticates against the VW Group identity stack using OAuth2/OIDC with PKCE, plus an HMAC-signed `X-QMAuth` header, plus several token exchanges across three backends (IDK / AZS / MBB). We emulate the Android client (`X-App-Version: 4.31.0`, User-Agent `Android/4.31.0 ...`) to be accepted. Each step below is annotated in `audi_connect/oauth.py` with a `# Step N:` comment for grep-ability.
+The password flow uses OAuth2/OIDC with PKCE and an HMAC-signed `X-QMAuth`
+header, followed by token exchanges across three backends (IDK / AZS / MBB).
+The code emulates the Android client (`X-App-Version: 4.31.0`). This header does
+not satisfy EU Play Integrity requirements. The diagram below describes the
+password path retained for US/CA/CN. In EU, device authorization/polling replaces
+steps 4–9 when allowed; both paths share discovery (1–3) and session setup
+(10–13). Each numbered step is annotated in `audi_connect/oauth.py`.
 
 ## Sequence diagram
 
@@ -162,7 +219,8 @@ The 100-second window means a single computed value is valid for roughly 100 sec
 ## Failure modes
 
 - **HTML form structure changes upstream** → `BeautifulSoup` parsing breaks, login dies at step 6 or 7. Symptom: `KeyError` on a hidden input name or empty `regex_res` for the `hmac` field.
-- **X-QMAuth secret rotation** → step 9 returns 401/403. All authentication fails until the APK is re-extracted and a new secret literal is shipped.
+- **EU device grant refused** → `unauthorized_client` before user sign-in. See the status above; credential changes do not fix the client's grant permission.
+- **EU attestation enforcement** → password step 9 returns `invalid assertion headers`. Updating the HMAC secret alone does not supply Play Integrity attestation.
 - **Captcha or MFA challenge inserted** → the password POST returns extra hidden fields or a different form. Flow stalls without a clear error.
 - **Audi rate limit hit** → 429 with a Retry-After header, or in worse cases the account is locked for hours and the official myAudi app also fails to log in. The `~6 req/h` budget defaults exist precisely to avoid this.
-- **Refresh token revoked** (password change or session terminated in myAudi app) → `refresh_tokens()` fails, `ensure_auth()` falls back to a full login. Track via `audi_auth_refresh_total{result="refresh_failure"}` in Prometheus.
+- **Refresh token revoked** (password change or session terminated in myAudi app) → `refresh_tokens()` fails, `ensure_auth()` falls back to a full login, which may be blocked in EU. Track via `audi_auth_refresh_total{result="refresh_failure"}` in Prometheus.

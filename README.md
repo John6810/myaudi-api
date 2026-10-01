@@ -40,6 +40,14 @@ In-depth technical reference is in [`docs/`](docs/README.md):
 
 ## Quick Start
 
+> **EU authentication status (2026-10-01):** Audi/VW is refusing new device-code
+> logins for this client (`unauthorized_client`), before any user sign-in. This
+> does not indicate bad credentials or an incorrect S-PIN. No reliable EU login
+> from scratch is currently verified for this API. Keep an existing
+> `~/.audi_connect_tokens.json`: valid refresh tokens may still work. Forcing the
+> password flow is not a workaround because of Play Integrity attestation.
+> See [EU login limitations and upstream findings](docs/oauth-flow.md#eu-login-status-2026-10-01).
+
 ```bash
 git clone https://github.com/John6810/myaudi-api.git
 cd myaudi-api
@@ -403,13 +411,14 @@ python -m pytest tests/ -v
 
 ## How It Works
 
-Authentication implements the OAuth2/OIDC flow used by the myAudi service in 13 steps:
+Authentication first tries the persisted session and refreshes stale access
+tokens. When a full login is needed, the OAuth2/OIDC flow is region-dependent:
 
 1. Fetch Audi market configuration
 2. OpenID Connect discovery
-3. PKCE challenge generation (S256)
-4. Email + password submission via HTML forms
-5. Exchange authorization code for an IDK bearer token
+3. EU: request a device code, show the approval URL, and poll for an IDK token **only if the provider accepts the grant** (see the EU limitation above)
+4. US/CA/CN: PKCE challenge, email/password HTML forms, and authorization-code exchange for an IDK token
+5. Both paths converge on the same session setup below
 6. Obtain the AZS (Audi) token
 7. Register MBB OAuth client (VW Group)
 8. Obtain and refresh the MBB token
@@ -419,7 +428,12 @@ Three tokens are managed in parallel:
 - **AZS**: for the Audi GraphQL API (vehicle list)
 - **MBB/VW**: for the legacy API (trips, lock/unlock)
 
-Tokens are cached locally (`~/.audi_connect_tokens.json`, 1h TTL, restricted file permissions on Unix) to skip the full login flow on subsequent runs. The API server refreshes tokens automatically every 45 minutes.
+Tokens are cached locally (`~/.audi_connect_tokens.json`, 30-day maximum cache age,
+restricted file permissions on Unix). This file includes refresh tokens; access
+tokens expire sooner and are refreshed on restore. The API server refreshes
+tokens automatically every 45 minutes. Preserve the token file across restarts;
+if refresh fails and a full EU login is required, the device-grant refusal may
+prevent reconnection. Existing sessions are not guaranteed to remain valid.
 
 ## Dependencies
 

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Report EU `unauthorized_client` device-grant refusals as `DeviceGrantRejectedError`
+  with an actionable CLI message instead of blaming credentials (#62). Preserve
+  the existing refresh path and show redacted details for other auth errors.
+- Document the current EU cold-start limitation and correct the documented token
+  cache age to 30 days (existing behavior).
+
 ## [1.0.0] - 2026-05-10
 
 Hardening release. The project gains a complete security, observability,

@@ -3,6 +3,7 @@
 from audi_connect.exceptions import (
     AudiConnectError,
     AuthenticationError,
+    DeviceGrantRejectedError,
     TokenRefreshError,
     VehicleNotFoundError,
     ActionFailedError,
@@ -15,6 +16,7 @@ from audi_connect.exceptions import (
 def test_all_exceptions_inherit_from_base():
     for exc_class in [
         AuthenticationError,
+        DeviceGrantRejectedError,
         TokenRefreshError,
         VehicleNotFoundError,
         ActionFailedError,
@@ -32,3 +34,7 @@ def test_exception_messages():
 
     e = SpinRequiredError("need pin")
     assert "pin" in str(e)
+
+
+def test_device_grant_refusal_is_an_authentication_error():
+    assert issubclass(DeviceGrantRejectedError, AuthenticationError)

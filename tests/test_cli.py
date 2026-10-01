@@ -3,6 +3,7 @@
 from main import _format_error, _resolve_vin
 from audi_connect.exceptions import (
     AuthenticationError,
+    DeviceGrantRejectedError,
     SpinRequiredError,
     CountryNotSupportedError,
     RequestTimeoutError,
@@ -14,8 +15,25 @@ from audi_connect.exceptions import (
 class TestFormatError:
     def test_auth_error(self):
         msg = _format_error(AuthenticationError("bad token"))
-        assert "AUDI_USERNAME" in msg
-        assert "AUDI_PASSWORD" in msg
+        assert "bad token" in msg
+        assert "Check your AUDI_USERNAME" not in msg
+
+    def test_device_grant_refusal(self):
+        msg = _format_error(DeviceGrantRejectedError("unauthorized_client"))
+        assert "unauthorized_client" in msg
+        assert "No reliable EU login from scratch" in msg
+        assert "Keep your existing ~/.audi_connect_tokens.json" in msg
+        assert "refresh tokens may still work" in msg
+        assert "Play Integrity" in msg
+        assert "Check your AUDI_USERNAME" not in msg
+
+    def test_auth_error_redacts_server_detail(self):
+        msg = _format_error(AuthenticationError(
+            'invalid assertion headers: {"refresh_token": "secret-refresh"}'
+        ))
+        assert "invalid assertion headers" in msg
+        assert "secret-refresh" not in msg
+        assert "***" in msg
 
     def test_spin_error(self):
         msg = _format_error(SpinRequiredError("no pin"))
