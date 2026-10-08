@@ -21,9 +21,26 @@ Workflow file: [.github/workflows/build.yml](../.github/workflows/build.yml).
 
 - `pull_request` runs only `test` (no GHCR push).
 - `push` to `main` runs `test` then `build` (gated by `needs: test`).
+- `workflow_dispatch` can publish and deploy a selected branch without merging
+  its PR. It runs the same tests first, then updates the GitOps image tag. Only
+  builds from `main` update `latest`; a branch build uses its commit tag.
 - The `build` job ends with a `sed` against `apps/myaudi-api/deployment.yaml` in the `argocd-apps` repo to bump the `image:` tag to the new SHA-7. ArgoCD picks up the commit and reconciles.
 
-Image registry: `ghcr.io/john6810/myaudi-api`. Tags: `<short-sha>` plus `latest`.
+Image registry: `ghcr.io/john6810/myaudi-api`. Tags: `<short-sha>` plus `latest`
+for `main` only. A manual branch deployment replaces the running homelab image;
+it does not create a separate staging environment.
+
+```bash
+gh workflow run build.yml --ref fix/62-eu-device-grant-diagnostic
+```
+
+Before dispatch, verify the target Deployment keeps one replica, `Recreate`,
+`HOME=/data`, and the existing `myaudi-api-tokens` PVC mounted at `/data`. These
+are configured in `argocd-apps/apps/myaudi-api/` as of 2026-10-08. Preserve the
+PVC and existing credentials so a restart can reuse the saved Audi session.
+For rollback, restore the previous image tag in the GitOps Deployment; do not
+delete the token volume. Image publication and GitOps success alone do not
+prove Audi authentication: check the ArgoCD rollout and `/ready` separately.
 
 ## Kubernetes deployment
 
