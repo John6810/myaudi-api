@@ -91,9 +91,11 @@ For a new Audi-side endpoint (e.g. a charging-mode action or a fresh data field)
 
 ## Common pitfalls
 
-- **Don't retry non-idempotent writes.** A 500 from Audi on `unlock` may mean the unlock already happened. Retrying could trigger a second unlock notification, burn an S-PIN security token, or lock the account on the rate budget. `unlock`, `start_climatisation`, `start_preheater` deliberately have no metier-level retry — see PR #23.
+- **Don't retry non-idempotent writes.** A 500 from Audi on `unlock` may mean the unlock already happened. Retrying could trigger a second unlock notification, burn an S-PIN security token, or lock the account on the rate budget. `unlock`, `start_climatisation`, `start_preheater` have no retry at either the action or HTTP layer — see PR #23.
 - **Don't lower the rate-limit defaults without a flag.** `AUDI_WATCH_INTERVAL` is clamped to a 900 s minimum; `AUDI_CACHE_TTL` defaults to 4h. Going below either invites account lockout.
 - **Don't log secrets.** The `RedactingFilter` catches the obvious patterns (bearer tokens, OAuth JSON keys, X-QMAuth, emails) but a new pattern needs an explicit entry. New password-or-token-shaped fields → update the filter at the same time.
 - **Don't refactor `oauth.py` without a real-account validation step.** Most of the file is dictated by upstream HTML/HTTP shape. Unit tests cover the helpers but cannot certify the end-to-end flow against Audi. A "small refactor" can break authentication for everyone with no in-CI signal.
 - **Don't break the single-replica invariant.** `server.py` and `audi_connect/token_store.py` both carry header banners listing the in-process state that breaks at `replicas > 1`. If you change the cache, the rate limiter, the watcher, or the token store, re-read those banners and either preserve the invariant or redesign the persistence layer first.
 - **Don't add deps casually.** `requirements.txt` is intentionally minimal. New deps must be justified and prefer a well-maintained package with a stable API.
+
+The test suite blocks outbound socket connections and isolates the default token path in a temporary directory. All Audi HTTP responses must be mocked. Regression tests also cover partial OAuth rotations, shared poll/backoff behavior and timestamp-based command confirmation.

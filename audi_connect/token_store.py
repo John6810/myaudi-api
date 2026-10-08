@@ -8,9 +8,8 @@
 import json
 import logging
 import os
-import stat
-import sys
 import time
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -34,7 +33,7 @@ class TokenStore:
     def __init__(self, filepath: str = DEFAULT_TOKEN_FILE):
         self._filepath = filepath
 
-    def save(self, state: OAuthState) -> None:
+    def save(self, state: OAuthState, saved_at: Optional[float] = None) -> None:
         """Save the OAuth state to disk.
 
         Adds a ``saved_at`` timestamp so :meth:`load` can enforce a max age.
@@ -42,16 +41,25 @@ class TokenStore:
         fields + ``saved_at``), so existing files migrate silently.
         """
         data = state.to_dict()
-        data["saved_at"] = time.time()
+        data["saved_at"] = time.time() if saved_at is None else saved_at
+        temporary = None
         try:
-            with open(self._filepath, "w") as f:
+            # A failed write must not truncate the last working session. The
+            # temporary file is owner-only from creation, before writing tokens.
+            with tempfile.NamedTemporaryFile(
+                mode="w", dir=Path(self._filepath).parent, delete=False,
+            ) as f:
+                temporary = f.name
                 json.dump(data, f, default=str)
-            # Restrict file permissions to owner-only (skip on Windows where chmod is limited)
-            if sys.platform != "win32":
-                os.chmod(self._filepath, stat.S_IRUSR | stat.S_IWUSR)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary, self._filepath)
             _LOGGER.debug("Tokens saved to %s", self._filepath)
         except OSError as e:
             _LOGGER.warning("Failed to save tokens: %s", e)
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
 
     def load(self, max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS) -> Optional[dict]:
         """Load tokens from disk if they exist and are not too old.

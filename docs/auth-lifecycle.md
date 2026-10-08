@@ -1,72 +1,52 @@
 # Auth lifecycle
 
-How tokens are obtained, cached, refreshed, and re-used across the three caching layers in this project.
+## Session persistence
 
-## Three layers of caching/refresh
+`AudiAuth` holds an `OAuthState` with the IDK, AZS and MBB tokens and their endpoint
+metadata. `TokenStore` persists that state to `~/.audi_connect_tokens.json` using
+an owner-only temporary file and atomic replacement. The default maximum file
+age is 30 days; access-token lifetimes are shorter. Keep this file across restarts.
 
-1. **In-memory tokens** — held by an `AudiAuth` instance as a single `OAuthState` (frozen dataclass with 10 fields: bearer_token, audi_token, vw_token, mbb_oauth_token, xclient_id, client_id, token_endpoint, authorization_server_base_url, mbb_oauth_base_url, language). Lives for the duration of the process.
-2. **Filesystem token cache** — `~/.audi_connect_tokens.json` written by `TokenStore.save(state)`. Loaded on next start by `TokenStore.load()`. Default maximum age: **30 days**, checked against the embedded `saved_at` field. This is a cache policy, not a guarantee of token validity. Access tokens expire sooner; persisted refresh tokens allow non-interactive renewal. File mode `0o600` on Unix (no chmod on Windows). See [audi_connect/token_store.py](../audi_connect/token_store.py).
-3. **Server-side refresh interval** — `server.py` declares `TOKEN_REFRESH_INTERVAL = 45 * 60` (45 minutes). Beyond this, `AudiClient._needs_refresh()` returns True and `ensure_auth()` is allowed to renew tokens. The 45-min budget sits comfortably under the 1-hour token lifetime so refreshes happen before tokens expire.
+A successful MBB or IDK refresh can rotate a refresh token before the next
+exchange fails. Each rotation is checkpointed immediately. Checkpoints retain the
+previous `saved_at`; only the complete refresh writes a fresh timestamp. Responses
+that omit a new refresh token retain the existing one.
 
-## Token state machine
+## Restore and refresh
 
-```mermaid
-stateDiagram-v2
-    [*] --> Unauthenticated
-    Unauthenticated --> Authenticating: ensure_auth()
-    Authenticating --> Authenticated: login() success
-    Authenticating --> Unauthenticated: login() failure
-    Authenticated --> NeedsRefresh: 45 min elapsed
-    NeedsRefresh --> Refreshing: ensure_auth() called
-    Refreshing --> Authenticated: refresh_tokens() success
-    Refreshing --> Authenticating: refresh_tokens() failure (fallback)
-    Authenticated --> [*]: shutdown
-```
+1. Restore an eligible cache and refresh if its MBB expiry gate requires it.
+2. Validate the session by fetching the vehicle list once.
+3. If a fresh-cache validation is rejected for authentication, force one token
+   refresh to account for the shorter-lived AZS token, then validate once more.
+4. Network errors, 429s and other transient failures preserve the token file and
+   propagate. They do not trigger another refresh or full login in the same call.
+5. An explicit `invalid_grant` on a refresh-token grant clears the rejected session
+   and permits a full login. `invalid_grant` on the AZS exchange does not prove
+   that a refresh token is invalid, so it also preserves the session.
 
-## ensure_auth() flow with refresh_tokens wiring
+The server normally refreshes every 45 minutes, on demand. Concurrent requests
+share an authentication lock. After a transient failure it waits at least 15
+minutes, or longer if the upstream 429 backoff is still active. The existing
+vehicle list stays available for a successful incremental recovery. A full login
+replaces the list and invalidates vehicle-data caching.
 
-Wired in PR #31 (commit `d0bc10d`). Before that PR, every refresh window triggered a full 13-step login (~10 upstream round-trips). Now the incremental path costs 3 calls and only falls back to full login on failure or when no auth context exists yet.
+## EU full login limitation
 
-```mermaid
-flowchart TD
-    start([ensure_auth called]) --> check{_needs_refresh?}
-    check -->|No| ok([return True])
-    check -->|Yes| lock[acquire _auth_lock]
-    lock --> recheck{Still needs refresh?}
-    recheck -->|No| ok
-    recheck -->|Yes| has_auth{_auth context exists<br/>and authenticated?}
-    has_auth -->|No| login[login - 13 steps, ~10 calls]
-    has_auth -->|Yes| refresh[refresh_tokens - ~3 calls]
-    refresh --> ok_r{Success?}
-    ok_r -->|Yes| metric_rs[metric: refresh_success]
-    metric_rs --> bump[update _auth_time]
-    bump --> ok
-    ok_r -->|No exception| metric_rf[metric: refresh_failure]
-    metric_rf --> login
-    login --> login_ok{Success?}
-    login_ok -->|Yes| metric_s[metric: success]
-    login_ok -->|No| metric_f[metric: failure]
-    metric_s --> ok
-    metric_f --> fail([return False])
-```
+A new EU login requests a device grant. When Audi rejects it with
+`unauthorized_client`, the client raises `DeviceGrantRejectedError`, shows the
+reason rather than blaming credentials, and the server stops automatic login
+attempts until configuration is changed and the process restarted. It does not
+try the blocked EU password flow as a fallback.
 
-Note: when `refresh_tokens()` returns `False` (no refresh was needed because the existing tokens are still valid), `ensure_auth()` simply bumps `_auth_time` and returns True — no call to `login()`, no metric increment. Only an exception path counts as `refresh_failure`.
+The existing PR #63 supplies this diagnostic. It does not unblock fresh EU
+sessions. See [OAuth findings](oauth-flow.md#eu-login-status-2026-10-01) and
+[request policy and current community sources](request-policy.md). Existing
+refresh tokens can expire or be revoked; neither persistence nor passing mocked
+tests guarantees continued provider acceptance.
 
-## Cache layer interaction
+## Observability
 
-- **At process start**: `AudiAuth.login()` calls `_try_restore_tokens()` first. A cache within the 30-day age limit is loaded into `OAuthState`; stale access tokens are refreshed before vehicle-list validation. If validation fails despite passing the freshness gate (for example, an expired AZS token), a forced refresh and one validation retry are attempted. Successful refresh persists rotated tokens. If refresh or validation still fails, the current implementation clears the cache and attempts full login; in EU this may then fail with `DeviceGrantRejectedError`.
-- **On successful full login**: `AudiAuth._save_tokens()` writes the new state to disk via `TokenStore.save(state)`. The on-disk format is identical to the pre-`OAuthState` shape (10 token fields + `saved_at`) — existing cache files migrate silently.
-- **On successful `refresh_tokens()`**: same — `_save_tokens()` is called, the freshly-rotated tokens land on disk and survive process restarts up to the TTL.
-- **`refresh_tokens()` does NOT re-fetch the vehicle list**. Only full `login()` does. This is intentional: refresh stays cheap.
-
-## Operational notes
-
-- Watch `audi_auth_refresh_total{result}` in Grafana. Healthy distribution over 24h with a single replica + active background watcher:
-  - ~32 `refresh_success` (one every 45 min)
-  - 0–1 `refresh_failure`
-  - 1–2 `success` (fallback full login)
-  - ~0 `failure` (only on Audi outage or rate-limit lockout)
-- **Many `refresh_failure` falling through to login** → inspect the actual error; revoked tokens and network/backend errors can both cause failures. Re-running setup is not a guaranteed recovery: EU fresh login is currently refused for this client.
-- **`unauthorized_client` on EU device authorization** → client/grant refusal before user sign-in, not a credential or S-PIN error. See [EU login status](oauth-flow.md#eu-login-status-2026-10-01).
-- Preserve the token file across restarts/deployments; do not delete a working session to troubleshoot this refusal. Successful refresh rotates and saves tokens. Existing sessions may continue working while the provider accepts their refresh tokens, but this is not guaranteed indefinitely.
-- The 30-day cache limit and existing refresh/fallback behavior are unchanged by the device-grant diagnostic fix. A file past that limit is still cleared by `TokenStore.load()`; the client cannot recover a fresh EU session reliably if its cached session is unusable.
+`audi_auth_refresh_total` distinguishes login success/failure and incremental
+refresh success/failure. `/ready` is unavailable after an auth failure. The data
+cache only advances its successful-update timestamp after status reads succeed;
+failed reads return 503 with `Retry-After`, rather than masquerading as fresh data.

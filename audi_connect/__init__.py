@@ -11,6 +11,8 @@ from .exceptions import (
     AuthenticationError,
     DeviceGrantRejectedError,
     TokenRefreshError,
+    RefreshTokenRejectedError,
+    VehicleUpdateError,
     VehicleNotFoundError,
     ActionFailedError,
     SpinRequiredError,

@@ -89,9 +89,9 @@ Windows and sunroof do not affect `state` or whether the vehicle can accept a lo
 
 `secure` is `true` only when `state` is `locked`, all four ordinary windows are explicitly closed, and the sunroof is explicitly closed. It is `false` when a required condition is explicitly unsatisfied and `null` when a required condition is unknown. Contradictory telemetry—such as locked fields combined with an open closure—remains visible in the detailed fields, produces `state: "open"`, and should be treated as stale or inconsistent data rather than a normal physical state.
 
-`doors_trunk` is a **legacy combined value** retained for compatibility. It can be `Open`, `Closed`, or `Locked` and must not be treated as a pure lock state; use `access` for new integrations.
+`doors_trunk` is a **legacy combined value** retained for compatibility. It can be `Open`, `Closed`, `Locked`, or `Unknown` and must not be treated as a pure lock state; use `access` for new integrations.
 
-The Home Assistant sensor, server goodnight check, and action-confirmation logic continue to use legacy compatibility fields in this release. Migrating those consumers to structured access state is intentionally deferred to a separate change so this API addition does not alter their behavior.
+Combined door fields now use explicit structured telemetry: missing or contradictory data is `Unknown`. The Home Assistant `doors_locked` sensor returns `null` for unknown locks. The goodnight check emits `lock_unknown` with `checks.locked: null`. Action confirmation also requires telemetry captured after the command was sent.
 
 ### `GET /brief`
 
@@ -99,7 +99,7 @@ The Home Assistant sensor, server goodnight check, and action-confirmation logic
 - Rate limit: 30/min.
 - Query: `?vin=<VIN>` (optional).
 - Returns: `{"vehicles": [brief]}` — `brief` is `AudiVehicle.get_brief()` (locked, position, range, battery/fuel).
-- `brief["locked"]` is a **legacy combined value** retained for compatibility. Despite its name, it can be `Open`, `Closed`, or `Locked`; use `/status` and its structured `access` object when lock and closure state must be distinguished.
+- `brief["locked"]` is a **legacy combined value** retained for compatibility. Despite its name, it can be `Open`, `Closed`, `Locked`, or `Unknown`; use `/status` and its structured `access` object when lock and closure state must be distinguished.
 
 ### `GET /position`
 
@@ -140,13 +140,13 @@ curl -H "X-API-Key: $AUDI_API_KEY" "http://localhost:8000/last-parked?vin=WAUXXX
 
 - Auth: `X-API-Key` + `AUDI_SPIN` env var must be set on the server.
 - Rate limit: 5/min.
-- Query: `?confirm=true` to wait 5s, force-update, and verify `doors_trunk == "Locked"` in the response.
+- Query: `?confirm=true` to wait 5s and check explicit locked/closed telemetry captured after the command. The shared polling minimum still applies. Missing, stale or unavailable telemetry returns `sent_unconfirmed`; a fresh nonmatching state returns `pending`.
 - Returns: `{"status": "sent" | "confirmed" | "pending" | "sent_unconfirmed", "action": "lock", "vin": ..., "vehicle_status"?: dashboard}`.
 
 ### `POST /{vin}/unlock`
 
-- Same shape as `/{vin}/lock` with `action: "unlock"` and the confirm check looking for `doors_trunk == "Closed"`.
-- Note: this action is **not retried** at the metier layer (idempotent-only retry policy from PR #23). A failed unlock surfaces immediately as 500.
+- Same shape as `/{vin}/lock` with `action: "unlock"`; confirmation requires all four door locks and the liftgate lock to explicitly report unlocked after the command.
+- Note: this action is **not retried** at either the action or transport layer. A failed unlock surfaces immediately as 500.
 
 ### `POST /{vin}/climate/start`
 
@@ -154,7 +154,7 @@ curl -H "X-API-Key: $AUDI_API_KEY" "http://localhost:8000/last-parked?vin=WAUXXX
 - Rate limit: 5/min.
 - Query: `?temp=<float>` (default 21.0, range 16–30) — temperature in Celsius. `?confirm=true` to verify after 5s.
 - Returns: `{"status", "action": "climate_start", "temperature": float, "vin"}`.
-- Not retried (cycle-restart side effect).
+- Not retried (cycle-restart side effect). Confirmation accepts fresh `heating`, `cooling` or `ventilation` telemetry; stop requires `off`. Unknown states remain unconfirmed.
 
 ### `POST /{vin}/climate/stop`
 
@@ -165,7 +165,7 @@ curl -H "X-API-Key: $AUDI_API_KEY" "http://localhost:8000/last-parked?vin=WAUXXX
 
 - Auth: `X-API-Key`. Rate limit: 5/min.
 - Query: `?duration=<int>` (default 30, range 10–60 min). `?confirm=true` supported.
-- Not retried (heater timer would extend on duplicate).
+- Not retried (heater timer would extend on duplicate). Heater start/stop with `confirm=true` returns `sent_unconfirmed` without polling: this client does not yet map reliable heater-state telemetry.
 
 ### `POST /{vin}/heater/stop`
 
@@ -296,3 +296,7 @@ For ICE vehicles (no `plug_state` reported by Audi), only the lock check applies
 ```
 
 Same HMAC signing rules as `state_change` when `AUDI_WEBHOOK_SECRET` is set.
+
+### Upstream read failures and polling
+
+Vehicle status failures return HTTP 503 with `Retry-After`, preserving the last successful cache timestamp. Failed refreshes wait at least 15 minutes before another attempt; they do not become fresh four-hour cache entries. All server polling (including confirmations and the watcher) shares this interval. Actions invalidate the cache even without `confirm=true`; the next permitted read refreshes it. A confirmation inside the polling interval can remain `sent_unconfirmed` rather than generating another upstream request. See [request policy](request-policy.md).

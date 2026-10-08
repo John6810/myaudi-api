@@ -21,6 +21,8 @@ from .exceptions import (
     AuthenticationError,
     CountryNotSupportedError,
     DeviceGrantRejectedError,
+    TokenRefreshError,
+    RefreshTokenRejectedError,
 )
 from .logging_utils import redact
 
@@ -595,11 +597,31 @@ class AudiOAuth:
         authorization_server_base_url: str,
         mbb_oauth_base_url: str,
         xclient_id: str,
+        on_refresh=None,
     ) -> dict:
         """Refresh all 3 tokens (MBB, IDK bearer, AZS).
 
         Returns a dict with fresh bearer_token, audi_token, vw_token, mbb_oauth_token.
         """
+        def validate(token: dict, context: str, refresh_grant: bool = True) -> None:
+            if token.get("access_token"):
+                return
+            # Do not print raw OAuth bodies: they may carry tokens alongside an error.
+            error = token.get("error", "missing access_token")
+            exception = (
+                RefreshTokenRejectedError if refresh_grant and error == "invalid_grant"
+                else TokenRefreshError
+            )
+            raise exception(f"{context} rejected: {redact(str(error))}")
+
+        def checkpoint() -> None:
+            if on_refresh is not None:
+                on_refresh({
+                    "bearer_token": bearer_token,
+                    "vw_token": vw_token,
+                    "mbb_oauth_token": mbb_oauth_token,
+                })
+
         # Refresh MBB token
         headers = {
             "Accept": "application/json",
@@ -619,9 +641,10 @@ class AudiOAuth:
             encoded, headers=headers, allow_redirects=False, rsp_wtxt=True,
         )
         vw_token = json.loads(rsptxt)
+        validate(vw_token, "MBB refresh")
 
-        if "refresh_token" in vw_token:
-            mbb_oauth_token["refresh_token"] = vw_token["refresh_token"]
+        mbb_oauth_token = {**mbb_oauth_token, **vw_token}
+        checkpoint()
 
         # Refresh IDK bearer token
         headers = {
@@ -643,6 +666,11 @@ class AudiOAuth:
             headers=headers, allow_redirects=False, rsp_wtxt=True,
         )
         new_bearer_token = json.loads(rsptxt)
+        validate(new_bearer_token, "IDK refresh")
+        # Some providers omit a refresh_token when it has not rotated.
+        new_bearer_token = {**bearer_token, **new_bearer_token}
+        bearer_token = new_bearer_token
+        checkpoint()
 
         # Refresh AZS token
         headers = {
@@ -665,6 +693,7 @@ class AudiOAuth:
             allow_redirects=False, rsp_wtxt=True,
         )
         audi_token = json.loads(rsptxt)
+        validate(audi_token, "AZS refresh", refresh_grant=False)
 
         return {
             "bearer_token": new_bearer_token,

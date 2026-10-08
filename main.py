@@ -31,7 +31,7 @@ load_dotenv()
 # Default VIN from .env (avoids --vin on every call for single-vehicle users)
 DEFAULT_VIN = os.getenv("AUDI_DEFAULT_VIN")
 
-# Audi's API has aggressive rate limits (~6 req/hour).
+# Audi's private APIs have endpoint-specific limits.
 # Enforcing a 15 min minimum for watch mode to avoid account lockout.
 MIN_WATCH_INTERVAL = 15 * 60
 
@@ -235,7 +235,7 @@ async def cmd_watch(args):
     if interval < MIN_WATCH_INTERVAL:
         print(
             f"Warning: interval {interval}s is below the {MIN_WATCH_INTERVAL}s minimum "
-            f"(Audi rate limits ~6 req/hour). Clamped to {MIN_WATCH_INTERVAL}s to avoid "
+            f"(local upstream protection). Clamped to {MIN_WATCH_INTERVAL}s to avoid "
             f"account lockout.\n"
         )
         interval = MIN_WATCH_INTERVAL

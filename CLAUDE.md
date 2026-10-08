@@ -24,7 +24,7 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
   - `uses_device_code(country)` selects the path: EU → device-code, `{US, CA, CN}` → password
   - Also handles token refresh (MBB, IDK, AZS); once device-code approval is done, the persisted refresh token keeps sessions non-interactive
   - X-QMAuth header (password flow only) via HMAC-SHA256 with a secret from the APK and a 100s-window timestamp
-  - **Why device-code**: since July 2026 Audi enforces Play Integrity attestation on the EU password/code-exchange step (returns `invalid assertion headers`). Since September 2026 the device grant is also refused for this client (`unauthorized_client`, upstream #842/#846). `DeviceGrantRejectedError` identifies that refusal before user sign-in; no reliable replacement cold-start is verified as of 2026-10-01. Existing refresh remains separate and unchanged. See `docs/oauth-flow.md`.
+  - **Why device-code**: since July 2026 Audi enforces Play Integrity attestation on the EU password/code-exchange step (returns `invalid assertion headers`). Since September 2026 the device grant is also refused for this client (`unauthorized_client`, upstream #842/#846). `DeviceGrantRejectedError` identifies that refusal before user sign-in; no reliable replacement cold-start is verified as of 2026-10-01. Existing refresh remains separate; transient errors preserve it and token rotations are checkpointed atomically. See `docs/oauth-flow.md`.
 - **`oauth_state.py`** - `OAuthState`: frozen dataclass holding all 10 OAuth tokens / endpoint URLs after login
   - `from_dict(d)` builds from oauth login result or TokenStore.load
   - `to_dict()` for serialization
@@ -51,7 +51,7 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
 - **`vehicle.py`** - `AudiVehicle` class:
   - Properties: mileage, range, battery, doors, windows, climate, trips (`_get_field`/`_get_state` are O(1) dict lookups via the indexed `VehicleDataResponse`)
   - Actions with input validation: `start_climatisation(16-30°C)`, `start_preheater(10-60 min)`
-  - **Idempotent-only retry policy**: `_idempotent_action_retry` (3 attempts, 2-10s exp backoff) applied ONLY to `lock`, `stop_climatisation`, `stop_preheater` (end-state same on duplicate). `unlock`, `start_climatisation`, `start_preheater` are NOT retried — duplicates can re-trigger notifications, extend the heater timer, or burn S-PIN tokens against the ~6 req/h Audi budget. Validation errors are never retried.
+  - **Idempotent-only retry policy**: `_idempotent_action_retry` (3 attempts, 2-10s exp backoff) applied ONLY to `lock`, `stop_climatisation`, `stop_preheater` (end-state same on duplicate). `unlock`, `start_climatisation`, `start_preheater` are NOT retried — duplicates can re-trigger notifications, extend the heater timer, or burn S-PIN tokens against the upstream Audi budget. Validation errors are never retried.
   - `get_brief()`: essentials only (locked, position, range)
   - `get_dashboard()`: full status dict
   - `update()`: parallel fetch via `asyncio.gather()` (status + position + trips)
@@ -72,8 +72,8 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
 - **`server.py`** (root, formerly `api.py`) - FastAPI REST API server:
   - All endpoints except `/health`, `/ready`, `/metrics` require `X-API-Key` header (matches `AUDI_API_KEY` env var via `Depends(require_api_key)`); fails closed with 503 if the key is unset on the server
   - Rate limiting via slowapi: 30 req/min (read), 5 req/min (actions) — HTTP 429 on exceed
-  - 4h data cache (auto-invalidated after actions); concurrent `?confirm=true` calls serialized through `_update_lock`
-  - Auto token refresh every 45min — incremental refresh (3 upstream calls) is tried first, with fallback to full login (~10 calls) only if refresh fails or no auth context exists yet
+  - 4h data cache (invalidated after actions); a shared 15-minute minimum coalesces forced polls, including concurrent confirmations and the watcher
+  - Auto token refresh every 45min — incremental refresh (3 upstream calls) is tried first, with fallback to full login only if the refresh token is explicitly rejected or no auth context exists; transient errors back off
   - `?confirm=true` on action endpoints to wait and verify
   - `GET /brief` for quick status
   - `GET /ready` returns 503 until authenticated to Audi Connect; `GET /health` always 200 if process alive
@@ -89,7 +89,7 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
 - **`ha_sensor.py`** - Home Assistant script (command_line sensor), outputs JSON to stdout
 
 ### Tests
-- **`tests/`** - 183 tests (pytest + pytest-asyncio + aioresponses + httpx for FastAPI TestClient) covering:
+- **`tests/`** - 340 tests (pytest + pytest-asyncio + aioresponses + httpx for FastAPI TestClient) covering:
   - `test_utils.py` - utility functions
   - `test_models.py` - response parsing + enums + indexed `get_field`/`get_state`
   - `test_exceptions.py` - exception hierarchy
@@ -199,12 +199,12 @@ POST /{vin}/heater/stop   Stop heater
 - Two API levels coexist: legacy (MBB/VW) and new (CARIAD) — the code supports both
 - Tokens are cached in `~/.audi_connect_tokens.json` (30-day max age, restricted permissions on Unix). On restore, stale access tokens are refreshed via the persisted refresh tokens; a manual device-code re-approval (EU) is only needed if the refresh token itself is dead (or the file is >30 days old).
 - Vehicle data fetches run in parallel via `asyncio.gather()` for better performance
-- Cache is auto-invalidated after actions (lock, climate, etc.) so next status reflects changes
+- Cache is invalidated after actions; the next read allowed by the 15-minute minimum refreshes data
 - Action endpoints support `?confirm=true` to wait 5s and verify the action was applied
 - Door/window states use `LockState`, `DoorState`, `WindowState` enums (not magic strings)
 - Input validation in core classes: temperature 16-30°C, heater duration 10-60 min
-- Network calls are retried 3 times with exponential backoff (1s, 2s, 4s) on timeout or connection errors (transport layer, in `audi_connect/api.py`)
-- Vehicle actions: business-level retry is **applied only to idempotent actions** (`lock`, `stop_climatisation`, `stop_preheater`) via `_idempotent_action_retry` (3 attempts, 2-10s backoff). `unlock`, `start_climatisation`, `start_preheater` are NOT retried at the metier layer to avoid double-fire on the ~6 req/h Audi budget. Validation errors (out-of-range temp/duration) are never retried.
+- GET/HEAD/OPTIONS requests retry up to 3 attempts on transport errors; POSTs and cancellation never retry in `audi_connect/api.py`. HTTP 429 pauses all requests on that instance for at least an hour, extended by Retry-After
+- Vehicle actions: business-level retry is **applied only to idempotent actions** (`lock`, `stop_climatisation`, `stop_preheater`) via `_idempotent_action_retry` (3 attempts, 2-10s backoff). `unlock`, `start_climatisation`, `start_preheater` are NOT retried at the metier layer to avoid double-fire on the upstream Audi budget. Validation errors (out-of-range temp/duration) are never retried.
 - REST API protected by `X-API-Key` header on all endpoints except `/health`, `/ready`, `/metrics`. Wired via FastAPI `Depends(require_api_key)` in `server.py`. Fails closed (503) if `AUDI_API_KEY` is unset on the server.
 - Logs sanitized via `RedactingFilter` (in `audi_connect/logging_utils.py`) — masks bearer tokens, OAuth JSON keys (access/refresh/id_token, password, spin, securityToken, securityPinHash, client_secret, code_verifier), `X-QMAuth` HMAC values, and emails (`xxx***@domain`). Installed once at startup in `server.py` and `main.py`.
 - `X-Request-ID` middleware on every request (uses client-provided value if present, else generates 12-hex-char uuid). Propagated to log records via contextvars and rendered as `[rid=...]` in log lines for end-to-end Loki/Grafana correlation.

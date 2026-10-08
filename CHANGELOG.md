@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require explicit post-command telemetry for lock/unlock and climate confirmation;
+  report unsupported heater confirmation as `sent_unconfirmed` without polling.
+- Return `Unknown` for missing/contradictory combined door status and `null` in the
+  Home Assistant lock sensor, instead of claiming the car is locked.
+- Cache only successful status updates; return 503 with backoff on failures.
+  Coalesce forced reads, invalidate after every action and remove watcher double polling.
+- Do not replay POST requests or cancelled tasks at the HTTP layer; restrict
+  action retries to transient errors on idempotent commands. Back off on HTTP 429.
+- Preserve sessions on transient auth failures and persist partial token rotations
+  atomically. Stop automatic login retries after an explicit device-grant refusal.
+
 - Report EU `unauthorized_client` device-grant refusals as `DeviceGrantRejectedError`
   with an actionable CLI message instead of blaming credentials (#62). Preserve
   the existing refresh path and show redacted details for other auth errors.

@@ -13,7 +13,7 @@ from audi_connect.vehicle import (
     MIN_HEATER_DURATION_MIN,
     MAX_HEATER_DURATION_MIN,
 )
-from audi_connect.exceptions import ActionFailedError, RequestTimeoutError
+from audi_connect.exceptions import ActionFailedError, RequestTimeoutError, VehicleUpdateError
 from audi_connect.models import VehicleDataResponse
 
 
@@ -147,7 +147,8 @@ class TestParallelUpdate:
         auth.get_stored_vehicle_data = AsyncMock(side_effect=Exception("fail"))
         auth.get_stored_position = AsyncMock(return_value={"lat": 50.0, "lon": 4.0, "carCapturedTimestamp": "t"})
         v = _make_vehicle(auth=auth)
-        await v.update()
+        with pytest.raises(VehicleUpdateError):
+            await v.update()
 
         # Position should still be fetched despite vehicle data failure
         assert v._position is not None
@@ -498,8 +499,8 @@ class TestStructuredAccessState:
         assert v.closure_status == "closed"
         assert v.access_state["state"] == "unknown"
         assert v.any_door_unlocked is True
-        assert v.get_dashboard()["doors_trunk"] == "Closed"
-        assert v.get_brief()["locked"] == "Closed"
+        assert v.get_dashboard()["doors_trunk"] == "Unknown"
+        assert v.get_brief()["locked"] == "Unknown"
 
     def test_unknown_closure_field_is_not_inferred_open_or_closed(self):
         v = _make_vehicle()
@@ -511,7 +512,7 @@ class TestStructuredAccessState:
         assert v.closure_status == "unknown"
         assert v.access_state["state"] == "unknown"
         assert v.any_door_open is True
-        assert v.get_dashboard()["doors_trunk"] == "Open"
+        assert v.get_dashboard()["doors_trunk"] == "Unknown"
 
     def test_all_access_fields_missing(self):
         v = _make_vehicle()
@@ -531,10 +532,10 @@ class TestStructuredAccessState:
         )
         assert all(window is None for window in access["windows"].values())
         assert access["sunroof_open"] is None
-        # These unsafe defaults are preserved only for backward compatibility.
-        assert v.get_dashboard()["doors_trunk"] == "Locked"
+        # Missing door telemetry must never imply that the vehicle is locked.
+        assert v.get_dashboard()["doors_trunk"] == "Unknown"
         assert v.get_dashboard()["windows"] == "Closed"
-        assert v.get_brief()["locked"] == "Locked"
+        assert v.get_brief()["locked"] == "Unknown"
 
     def test_each_ordinary_window_has_explicit_tristate_property(self):
         v = _make_vehicle()
@@ -599,7 +600,7 @@ class TestStructuredAccessState:
         assert v.any_window_open is True
         assert v.get_dashboard()["windows"] == "Open"
 
-    def test_contradictory_door_states_do_not_change_legacy_combined_behavior(self):
+    def test_contradictory_door_states_report_unknown(self):
         v = _make_vehicle()
         doors = _all_access_points()
         doors["frontLeft"] = ["locked", "unlocked", "closed"]
@@ -609,7 +610,7 @@ class TestStructuredAccessState:
         assert v.lock_status == "unknown"
         assert v.access_state["state"] == "unknown"
         assert v.any_door_unlocked is False
-        assert v.doors_trunk_status == "Locked"
+        assert v.doors_trunk_status == "Unknown"
 
         doors["frontLeft"] = ["locked", "open", "closed"]
         _set_access_data(v, doors)
@@ -617,7 +618,7 @@ class TestStructuredAccessState:
         assert v.closure_status == "unknown"
         assert v.access_state["state"] == "unknown"
         assert v.any_door_open is False
-        assert v.doors_trunk_status == "Locked"
+        assert v.doors_trunk_status == "Unknown"
 
 
 class TestBrief:
@@ -626,7 +627,7 @@ class TestBrief:
         v._position = {"lat": 50.123, "lon": 4.456, "carCapturedTimestamp": "t"}
         brief = v.get_brief()
         assert brief["vehicle"] == "My A4"
-        assert brief["locked"] == "Locked"
+        assert brief["locked"] == "Unknown"
         assert "50.123" in brief["position"]
         assert "maps" in brief
         assert "google.com/maps" in brief["maps"]

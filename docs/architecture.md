@@ -90,7 +90,7 @@ The table below covers `audi_connect/`. Public symbols are those re-exported by 
 ## Design constraints
 
 - **Single-replica only.** Vehicle data cache, slowapi rate limiter, token store on local filesystem, and the background watcher loop all assume one process. Banner enforced in headers of `server.py` and `audi_connect/token_store.py`.
-- **Audi rate limit ~6 req/h.** Defaults are conservative: 4h vehicle data cache, 15-min minimum watcher interval, 30/min read + 5/min write per-IP via slowapi.
+- **Upstream limits vary by endpoint.** No universal quota is verified. Defaults are conservative: 4h vehicle data cache, 15-min minimum watcher interval, 30/min read + 5/min write per-IP via slowapi.
 - **OAuth flow is fragile.** It scrapes HTML login forms via `BeautifulSoup` and uses an HMAC secret extracted from the Android APK byte array. Any upstream change (form structure, X-QMAuth secret rotation, captcha rollout) breaks authentication.
 - **Async-first.** Every I/O path is `async`. Vehicle status fetch parallelises status + position + trips via `asyncio.gather()`.
 - **No database.** Tokens persist to a single JSON file. Concurrent writers (e.g. two replicas on a shared volume) would race; this is documented and intentional.

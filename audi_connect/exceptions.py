@@ -17,6 +17,14 @@ class TokenRefreshError(AudiConnectError):
     """Raised when token refresh fails."""
 
 
+class RefreshTokenRejectedError(TokenRefreshError):
+    """The provider explicitly rejected a refresh token (invalid_grant)."""
+
+
+class VehicleUpdateError(AudiConnectError):
+    """Vehicle status could not be refreshed; existing data is stale."""
+
+
 class VehicleNotFoundError(AudiConnectError):
     """Raised when the requested VIN is not found."""
 

@@ -25,7 +25,7 @@ to change credentials. Other authentication errors retain their own reason.
 
 - Keep `~/.audi_connect_tokens.json` and its persisted refresh tokens. The
   separate refresh-token grant is still reported working for existing sessions;
-  the refresh and rotation path is unchanged. It cannot create a session without
+  refresh uses a separate grant; transient failures preserve the session and rotated tokens are checkpointed. It cannot create a session without
   an existing valid token, and tokens can still expire or be revoked.
 - Do not force the old EU password flow: its authorization-code exchange is
   blocked by Play Integrity attestation (`invalid assertion headers`).
@@ -222,5 +222,7 @@ The 100-second window means a single computed value is valid for roughly 100 sec
 - **EU device grant refused** → `unauthorized_client` before user sign-in. See the status above; credential changes do not fix the client's grant permission.
 - **EU attestation enforcement** → password step 9 returns `invalid assertion headers`. Updating the HMAC secret alone does not supply Play Integrity attestation.
 - **Captcha or MFA challenge inserted** → the password POST returns extra hidden fields or a different form. Flow stalls without a clear error.
-- **Audi rate limit hit** → 429 with a Retry-After header, or in worse cases the account is locked for hours and the official myAudi app also fails to log in. The `~6 req/h` budget defaults exist precisely to avoid this.
+- **Audi rate limit hit** → 429 with a Retry-After header, or in worse cases the account is locked for hours and the official myAudi app also fails to log in. The conservative request defaults exist precisely to avoid this.
 - **Refresh token revoked** (password change or session terminated in myAudi app) → `refresh_tokens()` fails, `ensure_auth()` falls back to a full login, which may be blocked in EU. Track via `audi_auth_refresh_total{result="refresh_failure"}` in Prometheus.
+
+For the safeguards added after PR #63 and community evidence checked on 2026-10-08, see [request policy](request-policy.md).

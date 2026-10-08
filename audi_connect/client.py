@@ -4,6 +4,7 @@ import json
 import logging
 from datetime import timedelta, datetime, timezone
 from typing import Optional
+from aiohttp import ClientResponseError
 
 from .api import AudiAPI
 from .endpoints import AudiEndpoints
@@ -66,10 +67,15 @@ class AudiVehicleClient:
             else "https://app-api.live-my.audi.com/vgql/v1/graphql"
         )
 
-        _, rsptxt = await self._api.request(
+        response, rsptxt = await self._api.request(
             "POST", graphql_url, json.dumps(graphql_query),
             headers=headers, allow_redirects=False, rsp_wtxt=True,
         )
+        if response.status >= 400:
+            raise ClientResponseError(
+                response.request_info, response.history, status=response.status,
+                message=response.reason, headers=response.headers,
+            )
         vins = json.loads(rsptxt)
 
         if "errors" in vins:
@@ -106,8 +112,10 @@ class AudiVehicleClient:
             return await self._api.get(
                 self._endpoints.cariad_url_for_vin(vin, "parkingposition")
             )
-        except Exception:
-            return None
+        except ClientResponseError as e:
+            if e.status == 404:
+                return None
+            raise
 
     async def get_tripdata(self, vin: str, kind: str) -> dict:
         """Fetch trip statistics (short-term or long-term)."""

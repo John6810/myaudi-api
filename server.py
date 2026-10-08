@@ -27,7 +27,7 @@ Requires: pip install fastapi uvicorn aiohttp beautifulsoup4 certifi tenacity
 # This service holds in-process state that is NOT safe to run concurrently:
 #   * AudiClient (module-global) — caches OAuth tokens, vehicle data, and a
 #     ~4h response cache. Two replicas would each hit Audi independently and
-#     rapidly exceed the ~6 req/hour upstream rate limit, locking the account.
+#     rapidly exceed the upstream request budget, locking the account.
 #   * slowapi Limiter — default in-memory backend; per-replica counters break
 #     the documented 30/min-read, 5/min-write quotas.
 #   * _background_watcher — one polling loop per replica = 2x the budget.
@@ -52,7 +52,7 @@ import ssl
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -74,6 +74,9 @@ from audi_connect.watcher import check_vehicles
 from audi_connect.exceptions import (
     AudiConnectError,
     SpinRequiredError,
+    DeviceGrantRejectedError,
+    RefreshTokenRejectedError,
+    VehicleUpdateError,
 )
 
 # ---------------------------------------------------------------------------
@@ -94,6 +97,9 @@ TZ = ZoneInfo(os.getenv("TZ", "Europe/Paris"))
 # Re-authenticate every 45 minutes (tokens expire after ~1h)
 TOKEN_REFRESH_INTERVAL = 45 * 60
 
+# Local backoff, not a claimed Audi quota. Share it across incoming requests.
+UPSTREAM_RETRY_INTERVAL = 15 * 60
+
 # Cache vehicle data to avoid hammering Audi's API (default: 4 hours)
 DATA_CACHE_TTL = int(os.getenv("AUDI_CACHE_TTL", "14400"))
 
@@ -106,7 +112,7 @@ WEBHOOK_URL = os.getenv("AUDI_WEBHOOK_URL")
 WEBHOOK_SECRET = os.getenv("AUDI_WEBHOOK_SECRET", "")
 
 # Watch interval for background polling (default: 0 = disabled)
-# Audi's API has aggressive rate limits (~6 req/hour). Enforcing a 15 min minimum
+# Audi's private APIs have endpoint-specific limits. Enforcing a 15 min minimum
 # to avoid account lockout. Set to 0 to disable background polling entirely.
 MIN_WATCH_INTERVAL = 15 * 60
 _raw_watch_interval = int(os.getenv("AUDI_WATCH_INTERVAL", "0"))
@@ -158,7 +164,7 @@ log = logging.getLogger("audi-api")
 
 if _raw_watch_interval > 0 and _raw_watch_interval < MIN_WATCH_INTERVAL:
     log.warning(
-        "AUDI_WATCH_INTERVAL=%ds is below the %ds minimum (Audi rate limits ~6 req/hour). "
+        "AUDI_WATCH_INTERVAL=%ds is below the %ds minimum (local upstream protection). "
         "Clamped to %ds to avoid account lockout.",
         _raw_watch_interval, MIN_WATCH_INTERVAL, WATCH_INTERVAL,
     )
@@ -207,6 +213,13 @@ class AudiClient:
         self._auth_lock = asyncio.Lock()
         self._last_update = 0.0
         self._update_lock = asyncio.Lock()
+        self._auth_retry_at = 0.0
+        self._auth_blocked = False
+        self._has_vehicle_list = False
+        self._next_update_at = 0.0
+        self._update_error: Optional[VehicleUpdateError] = None
+        self._cache_generation = 0
+        self._cached_generation = 0
 
     def _needs_refresh(self) -> bool:
         if not self.authenticated:
@@ -217,18 +230,22 @@ class AudiClient:
         """Login if needed (expired or missing). Thread-safe via lock.
 
         Tries an incremental token refresh first (3 upstream calls vs ~10
-        for a full login); falls back to login() if refresh fails or no
-        auth context exists yet.
+        for a full login). Transient failures preserve the session and back
+        off; only an explicitly rejected refresh token permits full login.
         """
+        if self._auth_blocked or time.monotonic() < self._auth_retry_at:
+            return False
         if not self._needs_refresh():
             return True
         async with self._auth_lock:
+            if self._auth_blocked or time.monotonic() < self._auth_retry_at:
+                return False
             if not self._needs_refresh():
                 return True
             # Try a token refresh first (3 upstream calls vs ~10 for
-            # full login). Fall back to login() if refresh fails or
-            # if we don't have an auth context yet.
-            if self._auth is not None and self.authenticated:
+            # full login). A previously validated vehicle list can be retained
+            # while a transient refresh failure is retried after the cooldown.
+            if self._auth is not None and (self.authenticated or self._has_vehicle_list):
                 elapsed = int(time.time() - self._auth_time)
                 try:
                     # force=True: our refresh interval (45min) is shorter than
@@ -239,19 +256,34 @@ class AudiClient:
                     # Audi call 401'd until a pod restart. Seen in prod.
                     if await self._auth.refresh_tokens(elapsed, force=True):
                         self._auth_time = time.time()
+                        self.authenticated = True
                         log.info("Tokens refreshed (no full re-login)")
                         audi_auth_refresh_total.labels(result="refresh_success").inc()
                         return True
                     # False — no usable auth context (e.g. missing refresh
                     # token): fall through to full login.
+                except RefreshTokenRejectedError:
+                    # Only explicit invalid_grant permits starting a new login.
+                    self._auth._reset_auth_state()
+                    self._auth = None
                 except Exception as e:
-                    log.warning("Token refresh failed (%s) — falling back to full login", e)
+                    log.warning("Token refresh failed (%s) — preserving session and backing off", e)
                     audi_auth_refresh_total.labels(result="refresh_failure").inc()
-                    # Fall through to full login.
-            return await self.login()
+                    self.authenticated = False
+                    self._auth_retry_at = time.monotonic() + max(
+                        UPSTREAM_RETRY_INTERVAL, self._auth.retry_after,
+                    )
+                    return False
+            result = await self.login()
+            if not result:
+                self._auth_retry_at = max(
+                    self._auth_retry_at, time.monotonic() + UPSTREAM_RETRY_INTERVAL,
+                )
+            return result
 
     async def login(self) -> bool:
         """Full authentication flow."""
+        self._has_vehicle_list = False
         log.info("Connecting to Audi Connect (%s)...", AUDI_USERNAME)
         t0 = time.time()
         try:
@@ -278,6 +310,11 @@ class AudiClient:
                 AUDI_USERNAME, AUDI_PASSWORD, on_verification=_on_verification
             )
             self.vehicles = [AudiVehicle(self._auth, v) for v in vehicle_list]
+            self._has_vehicle_list = True
+            self._last_update = 0.0
+            self._next_update_at = 0.0
+            self._update_error = None
+            self.invalidate_cache()
 
             self.authenticated = True
             self._auth_time = time.time()
@@ -287,38 +324,63 @@ class AudiClient:
             return True
 
         except Exception as e:
+            if self._auth is not None:
+                self._auth_retry_at = time.monotonic() + max(
+                    UPSTREAM_RETRY_INTERVAL, self._auth.retry_after,
+                )
+            if isinstance(e, DeviceGrantRejectedError):
+                # Repeating the same rejected client/grant cannot help. An
+                # operator can retry after correcting config and restarting.
+                self._auth_blocked = True
             log.error("Authentication failed: %s", e)
             self.authenticated = False
             audi_auth_refresh_total.labels(result="failure").inc()
             return False
 
     async def update_vehicles(self, force: bool = False) -> None:
-        """Update all vehicles data, respecting cache TTL."""
-        now = time.time()
-        if not force and (now - self._last_update) < DATA_CACHE_TTL:
-            audi_cache_operation_total.labels(operation="hit").inc()
-            return
+        """Cache successful reads; coalesce forced reads and back off failures."""
         async with self._update_lock:
-            # Double-check after acquiring lock
-            if not force and (time.time() - self._last_update) < DATA_CACHE_TTL:
+            if time.monotonic() < self._next_update_at:
+                if self._update_error is not None:
+                    raise self._update_error
+                audi_cache_operation_total.labels(operation="hit").inc()
+                return
+            if (not force and self._last_update and self._update_error is None
+                    and self._cached_generation == self._cache_generation
+                    and (time.time() - self._last_update) < DATA_CACHE_TTL):
                 audi_cache_operation_total.labels(operation="hit").inc()
                 return
             audi_cache_operation_total.labels(operation="miss").inc()
             t0 = time.time()
+            generation = self._cache_generation
+            self._next_update_at = time.monotonic() + UPSTREAM_RETRY_INTERVAL
+            self._update_error = VehicleUpdateError(
+                "Vehicle status unavailable; refresh did not complete. Retry after the backoff interval."
+            )
+            failures = []
             log.info("Updating vehicle data%s...", " (forced)" if force else " (cache expired)")
             for vehicle in self.vehicles:
                 try:
                     await vehicle.update()
                 except Exception as e:
                     log.error("Failed to update %s: %s", vehicle.vin, e)
+                    failures.append(vehicle.vin)
+            if failures:
+                if self._auth is not None:
+                    self._next_update_at = max(
+                        self._next_update_at, time.monotonic() + self._auth.retry_after,
+                    )
+                raise self._update_error
+            self._update_error = None
             self._last_update = time.time()
+            self._cached_generation = generation
             audi_backend_request_duration_seconds.labels(endpoint="update").observe(time.time() - t0)
             log.info("Vehicle data cached for %ds", DATA_CACHE_TTL)
 
     def invalidate_cache(self) -> None:
-        """Force next update_vehicles() call to refresh data."""
+        """Refresh on the next read allowed by the shared polling interval."""
         audi_cache_operation_total.labels(operation="invalidate").inc()
-        self._last_update = 0.0
+        self._cache_generation += 1
 
     def get_vehicle(self, vin: str) -> Optional[AudiVehicle]:
         """Find a vehicle by VIN (case-insensitive)."""
@@ -363,9 +425,12 @@ async def _goodnight_check(vehicles, on_alert) -> None:
         checks = {}
 
         # Lock check — always applicable
-        locked = vehicle.doors_trunk_status == "Locked"
+        status = vehicle.doors_trunk_status
+        locked = None if status == "Unknown" else status == "Locked"
         checks["locked"] = locked
-        if not locked:
+        if locked is None:
+            alerts.append("lock_unknown")
+        elif not locked:
             alerts.append("unlocked")
 
         # Plug check — only when the vehicle reports a plug state at all
@@ -438,7 +503,7 @@ async def _background_watcher() -> None:
             if not await client.ensure_auth():
                 continue
             await client.update_vehicles(force=True)
-            await check_vehicles(client.vehicles, prev_states, on_change=_on_change)
+            await check_vehicles(client.vehicles, prev_states, on_change=_on_change, refresh=False)
 
             # Goodnight check — fire once per day at the configured local hour.
             # The WATCH_INTERVAL (>=15min) is fine-grained enough that the
@@ -481,6 +546,10 @@ async def lifespan(app: FastAPI):
         _login_task.cancel()
     if _watcher_task:
         _watcher_task.cancel()
+    await asyncio.gather(
+        *(task for task in (_login_task, _watcher_task) if task is not None),
+        return_exceptions=True,
+    )
     await client.close()
 
 
@@ -525,6 +594,15 @@ async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
     return JSONResponse(
         status_code=429,
         content={"detail": "Rate limit exceeded. Try again later."},
+    )
+
+
+@app.exception_handler(VehicleUpdateError)
+async def _vehicle_update_error_handler(request: Request, exc: VehicleUpdateError):
+    return JSONResponse(
+        status_code=503,
+        content={"detail": str(exc)},
+        headers={"Retry-After": str(max(1, int(client._next_update_at - time.monotonic()) + 1))},
     )
 
 
@@ -701,10 +779,10 @@ async def lock_vehicle(request: Request, vin: str, confirm: bool = Query(False, 
     await _require_auth()
     vehicle = _get_vehicle_or_404(vin)
     try:
-        await _track_action("lock", vehicle, vehicle.lock())
+        sent_at = await _track_action("lock", vehicle, vehicle.lock())
         result = {"status": "sent", "action": "lock", "vin": vehicle.vin}
         if confirm:
-            result.update(await _confirm_action(vehicle, "doors_trunk", "Locked"))
+            result.update(await _confirm_action(vehicle, "lock", sent_at))
         return result
     except SpinRequiredError:
         raise HTTPException(status_code=400, detail="S-PIN not configured")
@@ -718,10 +796,10 @@ async def unlock_vehicle(request: Request, vin: str, confirm: bool = Query(False
     await _require_auth()
     vehicle = _get_vehicle_or_404(vin)
     try:
-        await _track_action("unlock", vehicle, vehicle.unlock())
+        sent_at = await _track_action("unlock", vehicle, vehicle.unlock())
         result = {"status": "sent", "action": "unlock", "vin": vehicle.vin}
         if confirm:
-            result.update(await _confirm_action(vehicle, "doors_trunk", "Closed"))
+            result.update(await _confirm_action(vehicle, "unlock", sent_at))
         return result
     except SpinRequiredError:
         raise HTTPException(status_code=400, detail="S-PIN not configured")
@@ -736,10 +814,10 @@ async def start_climate(request: Request, vin: str, temp: float = Query(21.0, ge
     await _require_auth()
     vehicle = _get_vehicle_or_404(vin)
     try:
-        await _track_action("climate_start", vehicle, vehicle.start_climatisation(temp_c=temp))
+        sent_at = await _track_action("climate_start", vehicle, vehicle.start_climatisation(temp_c=temp))
         result = {"status": "sent", "action": "climate_start", "temperature": temp, "vin": vehicle.vin}
         if confirm:
-            result.update(await _confirm_action(vehicle, "climatisation", None))
+            result.update(await _confirm_action(vehicle, "climate_start", sent_at))
         return result
     except AudiConnectError as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -751,10 +829,10 @@ async def stop_climate(request: Request, vin: str, confirm: bool = Query(False))
     await _require_auth()
     vehicle = _get_vehicle_or_404(vin)
     try:
-        await _track_action("climate_stop", vehicle, vehicle.stop_climatisation())
+        sent_at = await _track_action("climate_stop", vehicle, vehicle.stop_climatisation())
         result = {"status": "sent", "action": "climate_stop", "vin": vehicle.vin}
         if confirm:
-            result.update(await _confirm_action(vehicle, "climatisation", None))
+            result.update(await _confirm_action(vehicle, "climate_stop", sent_at))
         return result
     except AudiConnectError as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -767,10 +845,10 @@ async def start_heater(request: Request, vin: str, duration: int = Query(30, ge=
     await _require_auth()
     vehicle = _get_vehicle_or_404(vin)
     try:
-        await _track_action("heater_start", vehicle, vehicle.start_preheater(duration=duration))
+        sent_at = await _track_action("heater_start", vehicle, vehicle.start_preheater(duration=duration))
         result = {"status": "sent", "action": "heater_start", "duration": duration, "vin": vehicle.vin}
         if confirm:
-            result.update(await _confirm_action(vehicle, None, None))
+            result.update(await _confirm_action(vehicle, "heater_start", sent_at))
         return result
     except AudiConnectError as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -782,45 +860,44 @@ async def stop_heater(request: Request, vin: str, confirm: bool = Query(False)):
     await _require_auth()
     vehicle = _get_vehicle_or_404(vin)
     try:
-        await _track_action("heater_stop", vehicle, vehicle.stop_preheater())
+        sent_at = await _track_action("heater_stop", vehicle, vehicle.stop_preheater())
         result = {"status": "sent", "action": "heater_stop", "vin": vehicle.vin}
         if confirm:
-            result.update(await _confirm_action(vehicle, None, None))
+            result.update(await _confirm_action(vehicle, "heater_stop", sent_at))
         return result
     except AudiConnectError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def _confirm_action(vehicle: AudiVehicle, check_field: Optional[str], expected_value: Optional[str]) -> dict:
-    """Wait a few seconds, re-fetch vehicle data via the cache-coordinated path,
-    and check if the action was applied. Goes through client.update_vehicles()
-    so concurrent confirms are serialized by _update_lock and don't fan out
-    parallel selectivestatus calls against the ~6 req/h Audi budget."""
-    client.invalidate_cache()
+async def _confirm_action(vehicle: AudiVehicle, action: str, sent_at: datetime) -> dict:
+    """Check fresh telemetry once, without bypassing the shared poll budget."""
+    if action.startswith("heater_"):
+        return {"status": "sent_unconfirmed", "detail": "Heater state telemetry is not supported"}
     await asyncio.sleep(5)
     try:
         await client.update_vehicles(force=True)
-        dashboard = vehicle.get_dashboard()
-        confirmed = True
-        if check_field and expected_value:
-            confirmed = dashboard.get(check_field) == expected_value
-        return {"status": "confirmed" if confirmed else "pending", "vehicle_status": dashboard}
+        confirmed = vehicle.action_confirmed(action, sent_at)
+        status = "sent_unconfirmed" if confirmed is None else "confirmed" if confirmed else "pending"
+        return {"status": status, "vehicle_status": vehicle.get_dashboard()}
     except Exception as e:
         log.warning("Could not confirm action: %s", e)
-        return {"status": "sent_unconfirmed", "detail": str(e)}
+        return {"status": "sent_unconfirmed", "detail": "Vehicle status could not be refreshed"}
 
 
 async def _track_action(action: str, vehicle: AudiVehicle, coro):
     """Wrap an action coroutine to emit Prometheus metrics."""
     t0 = time.time()
+    sent_at = datetime.now(timezone.utc)
     try:
         await coro
     except Exception:
         audi_action_total.labels(action=action, result="failure").inc()
         raise
     finally:
+        client.invalidate_cache()
         audi_backend_request_duration_seconds.labels(endpoint=action).observe(time.time() - t0)
     audi_action_total.labels(action=action, result="success").inc()
+    return sent_at
 
 
 # ---------------------------------------------------------------------------
