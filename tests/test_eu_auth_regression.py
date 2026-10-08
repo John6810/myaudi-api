@@ -13,13 +13,42 @@ from yarl import URL
 from audi_connect.api import AudiAPI
 from audi_connect.auth import AudiAuth
 from audi_connect.exceptions import DeviceGrantRejectedError
-from audi_connect.oauth import DEVICE_AUTH_ENDPOINT_FALLBACK, DEVICE_CODE_SCOPE
+from audi_connect.oauth import AudiOAuth, DEVICE_AUTH_ENDPOINT_FALLBACK, DEVICE_CODE_SCOPE
 from audi_connect.token_store import TokenStore
 
 
 CLIENT_ID = "09b6cbec-cd19-4589-82fd-363dfa8c24da@apps_vw-dilab_com"
 GRAPHQL_URL = "https://app-api.live-my.audi.com/vgql/v1/graphql"
 DESCRIPTION = "client is not allowed to use the device_code grant"
+
+
+@pytest.mark.asyncio
+async def test_market_configuration_can_rotate_discovery_and_audi_proxy():
+    """Use the published production URLs without requiring a retired key."""
+    discovery = "https://config.example/oidc/openid-configuration"
+    async with aiohttp.ClientSession() as session:
+        oauth = AudiOAuth(AudiAPI(session), country="BE")
+        with aioresponses() as mock:
+            mock.get(
+                "https://content.app.my.audi.com/service/mobileapp/configurations/markets",
+                payload={"countries": {"countrySpecifications": {"BE": {"defaultLanguage": "nl"}}}},
+            )
+            mock.get(
+                "https://content.app.my.audi.com/service/mobileapp/configurations/market/BE/nl?v=4.23.1",
+                payload={
+                    "idkLoginServiceConfigurationURLProduction": discovery,
+                    "myAudiAuthorizationServerProxyServiceURLProduction": "https://audi-proxy.example",
+                },
+            )
+            mock.get(discovery, payload={"token_endpoint": "https://idp.example/token"})
+
+            config = await oauth._fetch_login_config()
+
+            assert config["token_endpoint"] == "https://idp.example/token"
+            assert config["authorization_server_base_url"] == "https://audi-proxy.example"
+            assert config["client_id"] == CLIENT_ID
+            assert config["device_authorization_endpoint"] == DEVICE_AUTH_ENDPOINT_FALLBACK
+            assert sum(len(calls) for calls in mock.requests.values()) == 3
 
 
 @pytest.mark.asyncio

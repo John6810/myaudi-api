@@ -89,7 +89,7 @@ Standalone Python client for the Audi Connect (myAudi) API. Connects to Audi/VW 
 - **`ha_sensor.py`** - Home Assistant script (command_line sensor), outputs JSON to stdout
 
 ### Tests
-- **`tests/`** - 340 tests (pytest + pytest-asyncio + aioresponses + httpx for FastAPI TestClient) covering:
+- **`tests/`** - 341 tests (pytest + pytest-asyncio + aioresponses + httpx for FastAPI TestClient) covering:
   - `test_utils.py` - utility functions
   - `test_models.py` - response parsing + enums + indexed `get_field`/`get_state`
   - `test_exceptions.py` - exception hierarchy

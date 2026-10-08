@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Follow the market configuration's production OIDC discovery URL and use the
+  Audi authorization proxy without requiring an unrelated retired config key.
+  This prepares for endpoint rotations; it does not fix the EU grant refusal.
 - Require explicit post-command telemetry for lock/unlock and climate confirmation;
   report unsupported heater confirmation as `sent_unconfirmed` without polling.
 - Return `Unknown` for missing/contradictory combined door status and `null` in the

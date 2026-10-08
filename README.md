@@ -407,7 +407,7 @@ myaudi-api/
 python -m pytest tests/ -v
 ```
 
-340 tests covering: authentication flow, OAuth helpers, OAuthState dataclass + token persistence, vehicle data parsing, action validation, idempotent-only retry policy, parallel fetching, error formatting, enums, state watcher, integration tests with mocked HTTP, URL building / home-region cache, log secret redaction, X-API-Key dependency, /metrics + /ready + request-id middleware.
+341 tests covering: authentication flow, OAuth helpers, OAuthState dataclass + token persistence, vehicle data parsing, action validation, idempotent-only retry policy, parallel fetching, error formatting, enums, state watcher, integration tests with mocked HTTP, URL building / home-region cache, log secret redaction, X-API-Key dependency, /metrics + /ready + request-id middleware.
 
 ## How It Works
 

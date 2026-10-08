@@ -149,13 +149,17 @@ class AudiOAuth:
         )
         openidcfg_url = self._get_cariad_url("/auth/v1/idk/oidc/openid-configuration")
         marketcfg_json = await self._api.request("GET", marketcfg_url, None)
+        openidcfg_url = (
+            marketcfg_json.get("idkLoginServiceConfigurationURLProduction")
+            or openidcfg_url
+        )
 
         client_id = "09b6cbec-cd19-4589-82fd-363dfa8c24da@apps_vw-dilab_com"
         if "idkClientIDAndroidLive" in marketcfg_json:
             client_id = marketcfg_json["idkClientIDAndroidLive"]
 
         authorization_server_base_url = self._get_cariad_url("/login/v1/audi")
-        if "authorizationServerBaseURLLive" in marketcfg_json:
+        if "myAudiAuthorizationServerProxyServiceURLProduction" in marketcfg_json:
             authorization_server_base_url = marketcfg_json[
                 "myAudiAuthorizationServerProxyServiceURLProduction"
             ]

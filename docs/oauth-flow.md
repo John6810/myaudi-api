@@ -51,6 +51,62 @@ Upstream evidence checked on 2026-10-01:
   entity set and sometimes empty continuous feeds on new cars. It is not a
   replacement for remote lock/unlock or a guaranteed complete data feed.
 
+## Follow-up diagnosis (2026-10-08)
+
+The deployed image was verified against its published digest. Its process and
+persistent token volume are healthy, but no saved session exists. The single
+startup device authorization request received `unauthorized_client`; the server
+then stopped further login attempts. `/health` remains 200 and `/ready` remains
+503. These probes do not call Audi.
+
+Five anonymous configuration GETs (markets, DE and BE market configuration,
+IDK discovery, Auth0 discovery) were made with no retries or account credentials:
+
+- DE and BE publish the same production IDK discovery and Audi proxy URLs.
+- Neither market payload includes `idkClientIDAndroidLive`, so this client uses
+  its documented fallback client ID.
+- IDK discovery advertises device-grant support in general, but no device
+  authorization endpoint. General grant support does not authorize our client;
+  its device request is explicitly refused.
+- The Auth0 discovery URL discussed upstream returned HTTP 400. This alone
+  establishes neither a usable browser flow nor the reason for that response.
+
+The inspection also found two discovery defects: the code ignored the market's
+production discovery URL, and required the unrelated `authorizationServerBaseURLLive`
+key before using `myAudiAuthorizationServerProxyServiceURLProduction`. Both are
+corrected with a mocked regression for URL rotation. The published DE/BE URLs
+currently match the previous defaults, so this does not resolve the observed
+device-grant refusal.
+
+[VWGroup Connect PR #1728](https://github.com/its-me-prash/vwgroup-connect-ha/pull/1728),
+merged on October 4, explicitly removes stale claims that Audi device login still
+works. It also identifies alternative client IDs as unverified, rather than a
+reason to cycle through them on a user's account. The
+[maintainer's account test](https://github.com/its-me-prash/vwgroup-connect-ha/issues/1364#issuecomment-5570482595)
+reports the app-attestation barrier for new Audi sessions and no replacement
+remote-command path for the Q4 e-tron/MEB platform.
+
+### Other GitHub projects checked
+
+| Project | Evidence | Relevance to this refusal |
+| --- | --- | --- |
+| ioBroker VW Connect | [Issue #451](https://github.com/TA2k/ioBroker.vw-connect/issues/451) reproduces the Audi device-flow 403 and repeated restarts. [v0.9.11 notes](https://github.com/TA2k/ioBroker.vw-connect#0911-2026-09-23) disable classic Audi login. | Its update stops the dead login and uses Data Act/Tibber; it does not reopen the grant. |
+| CarConnectivity Audi | [Issue #32](https://github.com/acfischer42/CarConnectivity-connector-audi/issues/32) reproduces `invalid assertion headers`. [PR #33](https://github.com/acfischer42/CarConnectivity-connector-audi/pull/33), still open, switches to device authorization. | Reported successful validations end on September 1, before later refusal reports. This is the same grant already implemented here, not a current independent replacement. |
+| evcc | [PR #30364](https://github.com/evcc-io/evcc/pull/30364), merged May 31, routes Audi to Data Act. [PR #30549](https://github.com/evcc-io/evcc/pull/30549), merged June 21, removes the old Audi implementation. | An Audi template working in current evcc does not demonstrate that the native myAudi API login works. |
+| Audi Connect HA / VWGroup Connect | [#842](https://github.com/audiconnect/audi_connect_ha/issues/842), [#1364](https://github.com/its-me-prash/vwgroup-connect-ha/issues/1364), and the October 4 correction above. | Existing refresh sessions and new logins must be distinguished. No verified cold-login command path for an EU Q4 was found in these sources. |
+
+Earlier fixes are dated evidence: ioBroker [#423](https://github.com/TA2k/ioBroker.vw-connect/issues/423)
+was fixed in May with v0.8.7, while the September refusal in #451 required a
+different response. Do not treat an old closed authentication issue as proof
+that its workaround still applies. No new account login or vehicle command was
+attempted during this follow-up investigation.
+
+The [official EU Data Act portal](https://eu-data-act.drivesomethinggreater.com/)
+is a separate read-only candidate. Its landing page currently warns that some
+downloads contain `No Content Found`. Portal login, ownership/consent and actual
+data delivery must be verified before treating it as a working fallback. It
+does not supply the IDK/AZS/MBB session used by this service or restore commands.
+
 ## Why a 13-step flow
 
 The password flow uses OAuth2/OIDC with PKCE and an HMAC-signed `X-QMAuth`
