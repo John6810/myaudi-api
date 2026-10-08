@@ -2,13 +2,14 @@
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Optional
 
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from aiohttp import ClientResponseError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+from aiohttp import ClientResponseError, ClientConnectionError
 
 from .auth import AudiAuth
-from .exceptions import ActionFailedError, RequestTimeoutError
+from .exceptions import ActionFailedError, RequestTimeoutError, VehicleUpdateError
 from .models import VehicleDataResponse, TripDataResponse, LockState, DoorState, WindowState
 from .utils import parse_int, parse_float
 
@@ -18,11 +19,14 @@ _LOGGER = logging.getLogger(__name__)
 # heater-stop). End state is the same whether applied once or N times.
 # Non-idempotent actions (unlock, climate-start, heater-start) are NOT
 # retried at this layer: a duplicated send can re-trigger notifications,
-# extend the heater timer, or burn the ~6 req/h Audi budget on S-PIN tokens.
+# extend the heater timer, or burn the upstream Audi budget on S-PIN tokens.
 _idempotent_action_retry = retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type((RequestTimeoutError, ConnectionError, OSError, ClientResponseError)),
+    retry=retry_if_exception(lambda e: (
+        isinstance(e, (RequestTimeoutError, ConnectionError, OSError, ClientConnectionError))
+        or (isinstance(e, ClientResponseError) and 500 <= e.status < 600)
+    )),
     reraise=True,
     before_sleep=lambda rs: _LOGGER.warning("Action failed, retrying (attempt %d)...", rs.attempt_number),
 )
@@ -76,13 +80,15 @@ class AudiVehicle:
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 _LOGGER.error("Fetch task %d failed: %s", i, result)
+        if isinstance(results[0], BaseException):
+            raise results[0]
 
     async def _fetch_vehicle_data(self) -> None:
         try:
             raw_data = await self._auth.get_stored_vehicle_data(self.vin)
             self._vehicle_data = VehicleDataResponse(raw_data)
         except Exception as e:
-            _LOGGER.error("Failed to get vehicle data: %s", e)
+            raise VehicleUpdateError("Failed to refresh vehicle status") from e
 
     async def _fetch_position(self) -> None:
         try:
@@ -439,11 +445,48 @@ class AudiVehicle:
 
     @property
     def doors_trunk_status(self) -> str:
-        if self.any_door_open or self.trunk_open:
-            return "Open"
-        if self.any_door_unlocked or self.trunk_unlocked:
-            return "Closed"
-        return "Locked"
+        return {
+            "open": "Open", "unlocked": "Closed", "locked": "Locked",
+            "unknown": "Unknown",
+        }[self._access_status()]
+
+    def action_confirmed(self, action: str, sent_at: datetime) -> Optional[bool]:
+        """Confirm only explicit telemetry captured after a command was sent.
+
+        None means unavailable, stale, or unsupported telemetry. False means
+        fresh telemetry reports that the requested state has not been reached.
+        Heater confirmation is unsupported until a dedicated state is mapped.
+        """
+        timestamps = []
+        if action in {"lock", "unlock"}:
+            if self._access_status() == "unknown" or self.lock_status == "unknown":
+                return None
+            for point in ("LEFT_FRONT_DOOR", "RIGHT_FRONT_DOOR", "LEFT_REAR_DOOR",
+                          "RIGHT_REAR_DOOR", "TRUNK_LID"):
+                for prefix in ("LOCK_STATE_", "OPEN_STATE_"):
+                    field = self._get_field(prefix + point)
+                    timestamps.append(field.measure_time if field else None)
+            matches = (
+                self._access_status() == "locked" if action == "lock"
+                else self.lock_status == "unlocked"
+            )
+        elif action in {"climate_start", "climate_stop"}:
+            state = self._get_state("climatisationState")
+            if not state or state["value"] not in {"off", "heating", "cooling", "ventilation"}:
+                return None
+            timestamps.append(state.get("measure_time"))
+            matches = (state["value"] == "off") == (action == "climate_stop")
+        else:
+            return None
+
+        for value in timestamps:
+            try:
+                captured = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if captured.tzinfo is None or captured < sent_at:
+                    return None
+            except (AttributeError, TypeError, ValueError):
+                return None
+        return matches
 
     # --- Windows ---
 

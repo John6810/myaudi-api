@@ -11,7 +11,7 @@ from audi_connect.oauth import (
     DEVICE_CODE_SCOPE,
     DEVICE_AUTH_ENDPOINT_FALLBACK,
 )
-from audi_connect.exceptions import AuthenticationError
+from audi_connect.exceptions import AuthenticationError, DeviceGrantRejectedError
 
 
 class TestUsesDeviceCode:
@@ -116,17 +116,34 @@ class TestPollDeviceToken:
 
 class TestLoginDeviceCode:
     @pytest.mark.asyncio
-    async def test_device_authorization_missing_device_code_raises(self):
+    async def test_error_redacts_secrets_before_truncating(self, caplog):
+        # CLI now displays the reason: truncating first would leave an unclosed
+        # JSON string that the existing redactor cannot recognize.
+        secret = "secret-token-" * 100
+        markets = {"countries": {"countrySpecifications": {"DE": {"defaultLanguage": "de"}}}}
+        oauth, _ = _oauth_with_requests([
+            markets, {}, {},
+            _txt({"error": "invalid_client", "refresh_token": secret}),
+        ])
+        with pytest.raises(AuthenticationError) as exc:
+            await oauth.login_device_code()
+        assert "invalid_client" in str(exc.value)
+        assert "secret-token" not in str(exc.value) + caplog.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("error", ["invalid_client", "invalid_scope", "access_denied"])
+    async def test_device_authorization_missing_device_code_raises(self, error):
         # _fetch_login_config makes 3 JSON calls, then the device-auth POST
         config_markets = {"countries": {"countrySpecifications": {"DE": {"defaultLanguage": "de"}}}}
         oauth, api = _oauth_with_requests([
             config_markets,                       # step 1 markets (json)
             {},                                   # step 2 marketcfg (json)
             {},                                   # step 3 openid (json)
-            _txt({"error": "invalid_client"}),    # device authorization (rsp_wtxt)
+            _txt({"error": error}),              # device authorization (rsp_wtxt)
         ])
-        with pytest.raises(AuthenticationError, match="did not return a device_code"):
+        with pytest.raises(AuthenticationError, match="did not return a device_code") as exc:
             await oauth.login_device_code()
+        assert not isinstance(exc.value, DeviceGrantRejectedError)
 
     @pytest.mark.asyncio
     async def test_full_device_flow_calls_finalize(self):

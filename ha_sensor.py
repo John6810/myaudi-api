@@ -44,7 +44,11 @@ async def get_vehicle_data() -> dict:
             "plug_state": vehicle.plug_state,
             "latitude": pos.get("latitude") if pos else None,
             "longitude": pos.get("longitude") if pos else None,
-            "doors_locked": not vehicle.any_door_unlocked,
+            "doors_locked": (
+                True if vehicle.lock_status == "locked"
+                else False if vehicle.lock_status in {"unlocked", "mixed"}
+                else None
+            ),
             "windows_closed": not vehicle.any_window_open,
             "climatisation": vehicle.climatisation_state,
         }

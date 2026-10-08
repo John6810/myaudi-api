@@ -109,7 +109,6 @@ class VehicleDataResponse:
         self._try_append_state(data, "plugledColor", -1, ["charging", "plugStatus", "value", "ledColor"])
 
         # Climate
-        self._try_append_state(data, "climatisationState", -1, ["climatisation", "auxiliaryHeatingStatus", "value", "climatisationState"])
         self._try_append_state(data, "climatisationState", -1, ["climatisation", "climatisationStatus", "value", "climatisationState"])
         self._try_append_state(data, "remainingClimatisationTime", -1, ["climatisation", "climatisationStatus", "value", "remainingClimatisationTime_min"])
 

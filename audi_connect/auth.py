@@ -3,6 +3,7 @@
 import logging
 import time
 from typing import Optional
+from aiohttp import ClientResponseError
 
 from .api import AudiAPI
 from .client import AudiVehicleClient
@@ -11,7 +12,7 @@ from .endpoints import AudiEndpoints
 from .oauth import AudiOAuth, uses_device_code
 from .oauth_state import OAuthState
 from .token_store import TokenStore
-from .exceptions import AuthenticationError, TokenRefreshError
+from .exceptions import AuthenticationError, TokenRefreshError, RefreshTokenRejectedError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,10 +32,15 @@ class AudiAuth:
 
         self._state: Optional[OAuthState] = None
         self._restored_age_sec: int = 0  # age of cache-restored tokens (0 = fresh login)
+        self._tokens_saved_at = 0.0
 
         # Delegates (created after login)
         self._client: Optional[AudiVehicleClient] = None
         self._actions: Optional[AudiVehicleActions] = None
+
+    @property
+    def retry_after(self) -> float:
+        return self._api.retry_after
 
     @property
     def client(self) -> AudiVehicleClient:
@@ -144,6 +150,7 @@ class AudiAuth:
             self._set_state(OAuthState.from_dict(cached))
             self._build_delegates()
             self._restored_age_sec = int(time.time() - cached.get("saved_at", 0))
+            self._tokens_saved_at = cached.get("saved_at", 0)
             _LOGGER.info("Restored tokens from cache (age: %ds)", self._restored_age_sec)
             return True
         except (KeyError, TypeError) as e:
@@ -155,6 +162,13 @@ class AudiAuth:
         """Persist current tokens to cache."""
         if self._state is not None:
             self._token_store.save(self._state)
+            self._tokens_saved_at = time.time()
+
+    def _checkpoint_refresh(self, refreshed: dict) -> None:
+        """Persist rotations immediately without declaring the whole session fresh."""
+        self._set_state(self._state.with_refresh({**self._state.to_dict(), **refreshed}))
+        self._build_delegates()
+        self._token_store.save(self._state, saved_at=self._tokens_saved_at or time.time())
 
     # --- Login ---
 
@@ -178,24 +192,19 @@ class AudiAuth:
                 # EU would demand a manual device-code re-approval.
                 # refresh_tokens() self-gates on the MBB expiry: fresh caches
                 # skip the upstream calls entirely.
-                await self.refresh_tokens(self._restored_age_sec)
-                return await self.client.get_vehicle_list()
-            except TokenRefreshError as e:
-                _LOGGER.info("Token refresh failed: %s. Re-authenticating...", e)
-                self._reset_auth_state()
-            except Exception as e:
-                # The freshness gate keys off the MBB expiry (1h), but the AZS
-                # token dies much sooner (~10min) — a restore can pass the gate
-                # and still fail validation here. Force-refresh all 3 tokens and
-                # retry once before surrendering to a full login, which on EU
-                # would cost an interactive device-code approval.
-                _LOGGER.info("Cached tokens rejected (%s) — forcing a token refresh...", e)
+                refreshed = await self.refresh_tokens(self._restored_age_sec)
                 try:
+                    return await self.client.get_vehicle_list()
+                except (AuthenticationError, ClientResponseError) as e:
+                    if refreshed or (isinstance(e, ClientResponseError) and e.status != 401):
+                        raise
+                    # A shorter-lived AZS token can expire before the MBB gate.
+                    # Only an auth refusal justifies this one forced refresh.
                     await self.refresh_tokens(self._restored_age_sec, force=True)
                     return await self.client.get_vehicle_list()
-                except Exception as e2:
-                    _LOGGER.info("Forced refresh failed: %s. Re-authenticating...", e2)
-                    self._reset_auth_state()
+            except RefreshTokenRejectedError as e:
+                _LOGGER.info("Refresh token rejected: %s. Re-authenticating...", e)
+                self._reset_auth_state()
 
         _LOGGER.info("Starting login to Audi Connect...")
         if uses_device_code(self._country):
@@ -247,6 +256,7 @@ class AudiAuth:
                 authorization_server_base_url=self._state.authorization_server_base_url,
                 mbb_oauth_base_url=self._state.mbb_oauth_base_url,
                 xclient_id=self._state.xclient_id,
+                on_refresh=self._checkpoint_refresh,
             )
             self._set_state(self._state.with_refresh(refreshed))
             self._build_delegates()
@@ -254,5 +264,7 @@ class AudiAuth:
             _LOGGER.info("Token refresh successful!")
             return True
 
+        except RefreshTokenRejectedError:
+            raise
         except Exception as e:
             raise TokenRefreshError(f"Token refresh failed: {e}") from e

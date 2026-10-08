@@ -9,8 +9,20 @@ class AuthenticationError(AudiConnectError):
     """Raised when authentication fails (bad credentials, expired session, etc.)."""
 
 
+class DeviceGrantRejectedError(AuthenticationError):
+    """Audi/VW refused this client's device grant before user authentication."""
+
+
 class TokenRefreshError(AudiConnectError):
     """Raised when token refresh fails."""
+
+
+class RefreshTokenRejectedError(TokenRefreshError):
+    """The provider explicitly rejected a refresh token (invalid_grant)."""
+
+
+class VehicleUpdateError(AudiConnectError):
+    """Vehicle status could not be refreshed; existing data is stale."""
 
 
 class VehicleNotFoundError(AudiConnectError):

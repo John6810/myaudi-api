@@ -9,7 +9,7 @@ from audi_connect.auth import AudiAuth
 from audi_connect.client import AudiVehicleClient
 from audi_connect.oauth import AudiOAuth
 from audi_connect.oauth_state import OAuthState
-from audi_connect.exceptions import AuthenticationError, TokenRefreshError
+from audi_connect.exceptions import RefreshTokenRejectedError, AuthenticationError, TokenRefreshError
 
 
 def _make_token_store(cached=None):
@@ -157,7 +157,7 @@ class TestLogin:
         })
 
         # First validation fails (dead AZS token), post-refresh retry succeeds.
-        calls = AsyncMock(side_effect=[Exception("token expired"), [{"vin": "X"}]])
+        calls = AsyncMock(side_effect=[AuthenticationError("token expired"), [{"vin": "X"}]])
         with patch.object(AudiVehicleClient, "get_vehicle_list", calls):
             result = await auth.login("user@test.com", "password123")
 
@@ -178,7 +178,7 @@ class TestLogin:
 
         auth = AudiAuth(api, country="DE", token_store=store)
         auth._oauth = AsyncMock()
-        auth._oauth.refresh_tokens = AsyncMock(side_effect=Exception("invalid_grant"))
+        auth._oauth.refresh_tokens = AsyncMock(side_effect=RefreshTokenRejectedError("invalid_grant"))
         auth._oauth.login_device_code = AsyncMock(return_value=_make_tokens())
 
         with patch.object(AudiVehicleClient, "get_vehicle_list", AsyncMock(return_value=[])):

@@ -19,25 +19,35 @@ from audi_connect.watcher import check_vehicles
 from audi_connect.exceptions import (
     AudiConnectError,
     AuthenticationError,
+    DeviceGrantRejectedError,
     SpinRequiredError,
     CountryNotSupportedError,
     RequestTimeoutError,
 )
+from audi_connect.logging_utils import redact
 
 load_dotenv()
 
 # Default VIN from .env (avoids --vin on every call for single-vehicle users)
 DEFAULT_VIN = os.getenv("AUDI_DEFAULT_VIN")
 
-# Audi's API has aggressive rate limits (~6 req/hour).
+# Audi's private APIs have endpoint-specific limits.
 # Enforcing a 15 min minimum for watch mode to avoid account lockout.
 MIN_WATCH_INTERVAL = 15 * 60
 
 
 def _format_error(e: Exception) -> str:
     """Convert exceptions to user-friendly messages."""
+    if isinstance(e, DeviceGrantRejectedError):
+        return (
+            f"Authentication unavailable: {redact(str(e))}\n"
+            "No reliable EU login from scratch is currently available in this client. "
+            "Keep your existing ~/.audi_connect_tokens.json: valid refresh tokens "
+            "may still work. The EU password flow is also blocked by Play Integrity "
+            "attestation (invalid assertion headers). See docs/oauth-flow.md."
+        )
     if isinstance(e, AuthenticationError):
-        return "Authentication failed. Check your AUDI_USERNAME and AUDI_PASSWORD."
+        return f"Authentication failed: {redact(str(e))}"
     if isinstance(e, SpinRequiredError):
         return "This action requires an S-PIN. Set AUDI_SPIN in your .env file."
     if isinstance(e, CountryNotSupportedError):
@@ -225,7 +235,7 @@ async def cmd_watch(args):
     if interval < MIN_WATCH_INTERVAL:
         print(
             f"Warning: interval {interval}s is below the {MIN_WATCH_INTERVAL}s minimum "
-            f"(Audi rate limits ~6 req/hour). Clamped to {MIN_WATCH_INTERVAL}s to avoid "
+            f"(local upstream protection). Clamped to {MIN_WATCH_INTERVAL}s to avoid "
             f"account lockout.\n"
         )
         interval = MIN_WATCH_INTERVAL

@@ -17,15 +17,25 @@ from bs4 import BeautifulSoup
 
 from .api import AudiAPI
 from .endpoints import cariad_url
-from .exceptions import AuthenticationError, CountryNotSupportedError
+from .exceptions import (
+    AuthenticationError,
+    CountryNotSupportedError,
+    DeviceGrantRejectedError,
+    TokenRefreshError,
+    RefreshTokenRejectedError,
+)
+from .logging_utils import redact
 
 _LOGGER = logging.getLogger(__name__)
 
 # OAuth 2.0 Device Authorization Grant (RFC 8628).
 # Since July 2026 Audi enforces Play Integrity attestation on the password
 # (authorization-code) token exchange in Europe, so the legacy login can no
-# longer complete there. The device-code flow does not hit that exchange and is
-# therefore the working path for EU accounts. US/CA/CN keep the password flow.
+# longer complete there. The device-code flow avoids that exchange, but since
+# September 2026 Audi/VW has also refused new device grants for this client.
+# Keep the request path available in case the provider allows it; do not fall back to the
+# blocked password flow. Existing refresh tokens use a separate grant.
+# US/CA/CN keep the password flow.
 DEVICE_CODE_SCOPE = "openid mbb profile badge cars dealers vin"  # "mbb" needed for legacy lock/unlock/trips/climate
 DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 DEVICE_AUTH_ENDPOINT_FALLBACK = "https://identity.vwgroup.io/oidc/v1/device_authorization"
@@ -139,13 +149,17 @@ class AudiOAuth:
         )
         openidcfg_url = self._get_cariad_url("/auth/v1/idk/oidc/openid-configuration")
         marketcfg_json = await self._api.request("GET", marketcfg_url, None)
+        openidcfg_url = (
+            marketcfg_json.get("idkLoginServiceConfigurationURLProduction")
+            or openidcfg_url
+        )
 
         client_id = "09b6cbec-cd19-4589-82fd-363dfa8c24da@apps_vw-dilab_com"
         if "idkClientIDAndroidLive" in marketcfg_json:
             client_id = marketcfg_json["idkClientIDAndroidLive"]
 
         authorization_server_base_url = self._get_cariad_url("/login/v1/audi")
-        if "authorizationServerBaseURLLive" in marketcfg_json:
+        if "myAudiAuthorizationServerProxyServiceURLProduction" in marketcfg_json:
             authorization_server_base_url = marketcfg_json[
                 "myAudiAuthorizationServerProxyServiceURLProduction"
             ]
@@ -314,9 +328,10 @@ class AudiOAuth:
         )
         bearer_token_json = json.loads(bearer_token_rsptxt)
         if "access_token" not in bearer_token_json:
-            _LOGGER.error("Token exchange failed, response: %s", bearer_token_rsptxt)
+            detail = redact(bearer_token_rsptxt)
+            _LOGGER.error("Token exchange failed, response: %s", detail)
             raise AuthenticationError(
-                f"IDK token exchange did not return an access_token: {bearer_token_rsptxt[:500]}"
+                f"IDK token exchange did not return an access_token: {detail[:500]}"
             )
 
         return await self._finalize_session(bearer_token_json, config)
@@ -324,8 +339,9 @@ class AudiOAuth:
     async def login_device_code(self, on_verification=None) -> dict:
         """Device Authorization Grant (RFC 8628) login — EU regions.
 
-        Requires a one-time manual approval: the user opens the returned
-        verification URL, signs in and approves. The resulting refresh token is
+        When Audi/VW permits this client to use the grant, requires a one-time
+        manual approval: the user opens the returned verification URL, signs in
+        and approves. The resulting refresh token is
         then persisted so subsequent sessions refresh non-interactively.
 
         `on_verification`, if given, is called with a dict holding
@@ -339,7 +355,7 @@ class AudiOAuth:
         device_authorization_endpoint = config["device_authorization_endpoint"]
         token_endpoint = config["token_endpoint"]
 
-        # Step D1: Request a device + user code (no attestation required here).
+        # Step D1: Request a device + user code (no attestation header sent).
         _LOGGER.debug("Step D1: Requesting device authorization...")
         headers = {
             "Accept": "application/json",
@@ -357,10 +373,24 @@ class AudiOAuth:
             headers=headers, allow_redirects=False, rsp_wtxt=True,
         )
         device_init = json.loads(device_rsptxt)
+        if device_init.get("error") == "unauthorized_client":
+            # This is a client/grant refusal before credentials are submitted,
+            # not a user declining approval or an invalid username/password.
+            message = (
+                "Audi/VW refused the device-code grant for this client "
+                "(unauthorized_client), before user authentication. "
+                "This is not a username/password or S-PIN error."
+            )
+            description = device_init.get("error_description")
+            if isinstance(description, str) and description:
+                message += f" Server detail: {redact(description)[:500]}"
+            _LOGGER.error("%s", message)
+            raise DeviceGrantRejectedError(message)
         if "device_code" not in device_init:
-            _LOGGER.error("Device authorization failed, response: %s", device_rsptxt)
+            detail = redact(device_rsptxt)
+            _LOGGER.error("Device authorization failed, response: %s", detail)
             raise AuthenticationError(
-                f"Device authorization did not return a device_code: {device_rsptxt[:500]}"
+                f"Device authorization did not return a device_code: {detail[:500]}"
             )
 
         verification = {
@@ -571,11 +601,31 @@ class AudiOAuth:
         authorization_server_base_url: str,
         mbb_oauth_base_url: str,
         xclient_id: str,
+        on_refresh=None,
     ) -> dict:
         """Refresh all 3 tokens (MBB, IDK bearer, AZS).
 
         Returns a dict with fresh bearer_token, audi_token, vw_token, mbb_oauth_token.
         """
+        def validate(token: dict, context: str, refresh_grant: bool = True) -> None:
+            if token.get("access_token"):
+                return
+            # Do not print raw OAuth bodies: they may carry tokens alongside an error.
+            error = token.get("error", "missing access_token")
+            exception = (
+                RefreshTokenRejectedError if refresh_grant and error == "invalid_grant"
+                else TokenRefreshError
+            )
+            raise exception(f"{context} rejected: {redact(str(error))}")
+
+        def checkpoint() -> None:
+            if on_refresh is not None:
+                on_refresh({
+                    "bearer_token": bearer_token,
+                    "vw_token": vw_token,
+                    "mbb_oauth_token": mbb_oauth_token,
+                })
+
         # Refresh MBB token
         headers = {
             "Accept": "application/json",
@@ -595,9 +645,10 @@ class AudiOAuth:
             encoded, headers=headers, allow_redirects=False, rsp_wtxt=True,
         )
         vw_token = json.loads(rsptxt)
+        validate(vw_token, "MBB refresh")
 
-        if "refresh_token" in vw_token:
-            mbb_oauth_token["refresh_token"] = vw_token["refresh_token"]
+        mbb_oauth_token = {**mbb_oauth_token, **vw_token}
+        checkpoint()
 
         # Refresh IDK bearer token
         headers = {
@@ -619,6 +670,11 @@ class AudiOAuth:
             headers=headers, allow_redirects=False, rsp_wtxt=True,
         )
         new_bearer_token = json.loads(rsptxt)
+        validate(new_bearer_token, "IDK refresh")
+        # Some providers omit a refresh_token when it has not rotated.
+        new_bearer_token = {**bearer_token, **new_bearer_token}
+        bearer_token = new_bearer_token
+        checkpoint()
 
         # Refresh AZS token
         headers = {
@@ -641,6 +697,7 @@ class AudiOAuth:
             allow_redirects=False, rsp_wtxt=True,
         )
         audi_token = json.loads(rsptxt)
+        validate(audi_token, "AZS refresh", refresh_grant=False)
 
         return {
             "bearer_token": new_bearer_token,

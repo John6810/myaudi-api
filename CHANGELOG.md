@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Follow the market configuration's production OIDC discovery URL and use the
+  Audi authorization proxy without requiring an unrelated retired config key.
+  This prepares for endpoint rotations; it does not fix the EU grant refusal.
+- Require explicit post-command telemetry for lock/unlock and climate confirmation;
+  report unsupported heater confirmation as `sent_unconfirmed` without polling.
+- Return `Unknown` for missing/contradictory combined door status and `null` in the
+  Home Assistant lock sensor, instead of claiming the car is locked.
+- Cache only successful status updates; return 503 with backoff on failures.
+  Coalesce forced reads, invalidate after every action and remove watcher double polling.
+- Do not replay POST requests or cancelled tasks at the HTTP layer; restrict
+  action retries to transient errors on idempotent commands. Back off on HTTP 429.
+- Preserve sessions on transient auth failures and persist partial token rotations
+  atomically. Stop automatic login retries after an explicit device-grant refusal.
+
+- Report EU `unauthorized_client` device-grant refusals as `DeviceGrantRejectedError`
+  with an actionable CLI message instead of blaming credentials (#62). Preserve
+  the existing refresh path and show redacted details for other auth errors.
+- Document the current EU cold-start limitation and correct the documented token
+  cache age to 30 days (existing behavior).
+
 ## [1.0.0] - 2026-05-10
 
 Hardening release. The project gains a complete security, observability,

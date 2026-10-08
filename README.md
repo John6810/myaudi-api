@@ -6,7 +6,7 @@ Based on the open-source [audiconnect/audi_connect_ha](https://github.com/audico
 
 > **Disclaimer:** For personal and educational use only. Not affiliated with, endorsed by, or sponsored by Audi AG or Volkswagen Group. Use at your own risk — usage of the Audi Connect service is subject to Audi AG's terms of service.
 
-> ⚠️ **Rate limits:** Audi's API is known to enforce aggressive rate limits (~6 requests/hour). Excessive polling will temporarily lock your account **and** the official myAudi app until the window resets. The default settings here are conservative (4h cache, background watcher disabled, 15 min minimum poll interval) — don't override them unless you know what you're doing.
+> **Request limits:** no universal Audi quota is verified for these private endpoints. Cloud reads, vehicle wake-ups, authentication and remote commands can have different limits. Defaults remain conservative: 4h cache, background watcher disabled, and a shared 15-minute minimum between server data polls. HTTP 429 pauses calls for at least one hour, or longer when `Retry-After` requests it. See [request policy and sources](docs/request-policy.md).
 
 ## Features
 
@@ -21,7 +21,7 @@ Based on the open-source [audiconnect/audi_connect_ha](https://github.com/audico
 - Trip data (short-term and long-term)
 - **REST API** (FastAPI) with Docker deployment and rate limiting
 - **Watch mode** — monitor changes and send webhook notifications
-- **Action retry** — automatic retry on network failures (lock, climate, heater)
+- **Action retry** — up to three attempts for lock and stop commands only; no POST retry in the transport
 - Home Assistant integration via command_line sensor
 - OAuth token caching to avoid re-authenticating on every run
 - Interactive setup (`python main.py setup`)
@@ -39,6 +39,14 @@ In-depth technical reference is in [`docs/`](docs/README.md):
 - [Development](docs/development.md) — tests, patterns, pitfalls
 
 ## Quick Start
+
+> **EU authentication status (2026-10-01):** Audi/VW is refusing new device-code
+> logins for this client (`unauthorized_client`), before any user sign-in. This
+> does not indicate bad credentials or an incorrect S-PIN. No reliable EU login
+> from scratch is currently verified for this API. Keep an existing
+> `~/.audi_connect_tokens.json`: valid refresh tokens may still work. Forcing the
+> password flow is not a workaround because of Play Integrity attestation.
+> See [EU login limitations and upstream findings](docs/oauth-flow.md#eu-login-status-2026-10-01).
 
 ```bash
 git clone https://github.com/John6810/myaudi-api.git
@@ -399,17 +407,18 @@ myaudi-api/
 python -m pytest tests/ -v
 ```
 
-183 tests covering: authentication flow, OAuth helpers, OAuthState dataclass + token persistence, vehicle data parsing, action validation, idempotent-only retry policy, parallel fetching, error formatting, enums, state watcher, integration tests with mocked HTTP, URL building / home-region cache, log secret redaction, X-API-Key dependency, /metrics + /ready + request-id middleware.
+341 tests covering: authentication flow, OAuth helpers, OAuthState dataclass + token persistence, vehicle data parsing, action validation, idempotent-only retry policy, parallel fetching, error formatting, enums, state watcher, integration tests with mocked HTTP, URL building / home-region cache, log secret redaction, X-API-Key dependency, /metrics + /ready + request-id middleware.
 
 ## How It Works
 
-Authentication implements the OAuth2/OIDC flow used by the myAudi service in 13 steps:
+Authentication first tries the persisted session and refreshes stale access
+tokens. When a full login is needed, the OAuth2/OIDC flow is region-dependent:
 
 1. Fetch Audi market configuration
 2. OpenID Connect discovery
-3. PKCE challenge generation (S256)
-4. Email + password submission via HTML forms
-5. Exchange authorization code for an IDK bearer token
+3. EU: request a device code, show the approval URL, and poll for an IDK token **only if the provider accepts the grant** (see the EU limitation above)
+4. US/CA/CN: PKCE challenge, email/password HTML forms, and authorization-code exchange for an IDK token
+5. Both paths converge on the same session setup below
 6. Obtain the AZS (Audi) token
 7. Register MBB OAuth client (VW Group)
 8. Obtain and refresh the MBB token
@@ -419,7 +428,12 @@ Three tokens are managed in parallel:
 - **AZS**: for the Audi GraphQL API (vehicle list)
 - **MBB/VW**: for the legacy API (trips, lock/unlock)
 
-Tokens are cached locally (`~/.audi_connect_tokens.json`, 1h TTL, restricted file permissions on Unix) to skip the full login flow on subsequent runs. The API server refreshes tokens automatically every 45 minutes.
+Tokens are cached locally (`~/.audi_connect_tokens.json`, 30-day maximum cache age,
+restricted file permissions on Unix). This file includes refresh tokens; access
+tokens expire sooner and are refreshed on restore. The API server refreshes
+tokens automatically every 45 minutes. Preserve the token file across restarts;
+transient refresh failures preserve the session and back off. Only an explicit
+refresh-token refusal permits full login, which may be blocked in EU. Existing sessions are not guaranteed to remain valid.
 
 ## Dependencies
 

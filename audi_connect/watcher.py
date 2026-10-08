@@ -34,6 +34,7 @@ async def check_vehicles(
     on_initial: Optional[Callable[[AudiVehicle, dict], Awaitable[None]]] = None,
     on_error: Optional[Callable[[AudiVehicle, Exception], Awaitable[None]]] = None,
     target_vin: Optional[str] = None,
+    refresh: bool = True,
 ) -> None:
     """Poll each vehicle, compute diffs, and fire callbacks on changes.
 
@@ -44,13 +45,15 @@ async def check_vehicles(
         on_initial: Called with (vehicle, current_state) on first poll.
         on_error: Called with (vehicle, exception) when update fails.
         target_vin: If set, only check this VIN.
+        refresh: False when the caller already fetched data through its cache.
     """
     for vehicle in vehicles:
         if target_vin and vehicle.vin.upper() != target_vin.upper():
             continue
 
         try:
-            await vehicle.update()
+            if refresh:
+                await vehicle.update()
         except Exception as e:
             _LOGGER.error("Update failed for %s: %s", vehicle.vin, e)
             if on_error:
